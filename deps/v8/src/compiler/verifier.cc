@@ -850,12 +850,12 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kJSHasContextExtension:
       CheckTypeIs(node, Type::Boolean());
       break;
+    case IrOpcode::kJSLoadContextNoCell:
     case IrOpcode::kJSLoadContext:
-    case IrOpcode::kJSLoadScriptContext:
       CheckTypeIs(node, Type::Any());
       break;
+    case IrOpcode::kJSStoreContextNoCell:
     case IrOpcode::kJSStoreContext:
-    case IrOpcode::kJSStoreScriptContext:
       CheckNotTyped(node);
       break;
     case IrOpcode::kJSCreateFunctionContext:
@@ -881,6 +881,11 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckTypeIs(node, Type::Any());
       break;
 
+    case IrOpcode::kJSDetachContextCell:
+      CheckValueInputIs(node, 0, Type::Any());
+      CheckValueInputIs(node, 1, Type::Any());
+      CheckNotTyped(node);
+      break;
     case IrOpcode::kJSForInEnumerate:
       CheckValueInputIs(node, 0, Type::Any());
       CheckTypeIs(node, Type::OtherInternal());
@@ -919,7 +924,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckTypeIs(node, Type::SignedSmall());
       break;
 
-    case IrOpcode::kJSGeneratorRestoreContext:
+    case IrOpcode::kJSGeneratorRestoreContextNoCell:
       CheckTypeIs(node, Type::Any());
       break;
 

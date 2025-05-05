@@ -75,11 +75,6 @@ RootsTable& Heap::roots_table() { return isolate()->roots_table(); }
 MUTABLE_ROOT_LIST(ROOT_ACCESSOR)
 #undef ROOT_ACCESSOR
 
-Tagged<FixedArray> Heap::single_character_string_table() {
-  return Cast<FixedArray>(
-      Tagged<Object>(roots_table()[RootIndex::kSingleCharacterStringTable]));
-}
-
 #define STATIC_ROOTS_FAILED_MSG                                            \
   "Read-only heap layout changed. Run `tools/dev/gen-static-roots.py` to " \
   "update static-roots.h."
@@ -138,9 +133,10 @@ void Heap::SetFunctionsMarkedForManualOptimization(Tagged<Object> hash_table) {
 }
 
 #if V8_ENABLE_WEBASSEMBLY
-void Heap::SetWasmCanonicalRttsAndJSToWasmWrappers(
-    Tagged<WeakFixedArray> rtts, Tagged<WeakFixedArray> js_to_wasm_wrappers) {
+void Heap::SetWasmCanonicalRtts(Tagged<WeakFixedArray> rtts) {
   set_wasm_canonical_rtts(rtts);
+}
+void Heap::SetJSToWasmWrappers(Tagged<WeakFixedArray> js_to_wasm_wrappers) {
   set_js_to_wasm_wrappers(js_to_wasm_wrappers);
 }
 #endif  // V8_ENABLE_WEBASSEMBLY

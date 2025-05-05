@@ -26,6 +26,10 @@ namespace internal {
 class Isolate;
 class TrustedPointerPublishingScope;
 
+namespace wasm {
+class StackMemory;
+}
+
 #if V8_HOST_ARCH_64_BIT
 // In kSystemPointerSize.
 static constexpr int kFastCCallAlignmentPaddingCount = 5;
@@ -156,6 +160,7 @@ struct JSBuiltinDispatchHandleRoot {
   V(BuiltinEntryTable, Builtins::kBuiltinCount* kSystemPointerSize,            \
     builtin_entry_table)                                                       \
   V(BuiltinTable, Builtins::kBuiltinCount* kSystemPointerSize, builtin_table)  \
+  V(ActiveStack, kSystemPointerSize, active_stack)                             \
   ISOLATE_DATA_FIELDS_LEAPTIERING(V)
 
 #ifdef V8_COMPRESS_POINTERS
@@ -327,6 +332,8 @@ class IsolateData final {
   ThreadLocalTop const& thread_local_top() const { return thread_local_top_; }
   Address* builtin_entry_table() { return builtin_entry_table_; }
   Address* builtin_table() { return builtin_table_; }
+  wasm::StackMemory* active_stack() { return active_stack_; }
+  void set_active_stack(wasm::StackMemory* stack) { active_stack_ = stack; }
 #if V8_ENABLE_LEAPTIERING_BOOL && !V8_STATIC_DISPATCH_HANDLES_BOOL
   JSDispatchHandle builtin_dispatch_handle(Builtin builtin) {
     return builtin_dispatch_table_[JSBuiltinDispatchHandleRoot::to_idx(
@@ -344,7 +351,7 @@ class IsolateData final {
   // it's the case then the value can be accessed indirectly through the root
   // register.
   bool contains(Address address) const {
-    static_assert(std::is_unsigned<Address>::value);
+    static_assert(std::is_unsigned_v<Address>);
     Address start = reinterpret_cast<Address>(this);
     return (address - start) < sizeof(*this);
   }
@@ -524,6 +531,8 @@ class IsolateData final {
   // The entries in this array are tagged pointers to Code objects.
   Address builtin_table_[Builtins::kBuiltinCount] = {};
 
+  wasm::StackMemory* active_stack_ = nullptr;
+
 #if V8_ENABLE_LEAPTIERING_BOOL && !V8_STATIC_DISPATCH_HANDLES_BOOL
   // The entries in this array are dispatch handles for builtins with SFI's.
   JSDispatchHandle* builtin_dispatch_table() { return builtin_dispatch_table_; }
@@ -553,15 +562,14 @@ class IsolateData final {
 // issues because of different compilers used for snapshot generator and
 // actual V8 code.
 void IsolateData::AssertPredictableLayout() {
-  static_assert(std::is_standard_layout<StackGuard>::value);
-  static_assert(std::is_standard_layout<RootsTable>::value);
-  static_assert(std::is_standard_layout<ThreadLocalTop>::value);
-  static_assert(std::is_standard_layout<ExternalReferenceTable>::value);
-  static_assert(std::is_standard_layout<IsolateData>::value);
-  static_assert(std::is_standard_layout<LinearAllocationArea>::value);
-#define V(PureName, Size, Name)                                        \
-  static_assert(                                                       \
-      std::is_standard_layout<decltype(IsolateData::Name##_)>::value); \
+  static_assert(std::is_standard_layout_v<StackGuard>);
+  static_assert(std::is_standard_layout_v<RootsTable>);
+  static_assert(std::is_standard_layout_v<ThreadLocalTop>);
+  static_assert(std::is_standard_layout_v<ExternalReferenceTable>);
+  static_assert(std::is_standard_layout_v<IsolateData>);
+  static_assert(std::is_standard_layout_v<LinearAllocationArea>);
+#define V(PureName, Size, Name)                                             \
+  static_assert(std::is_standard_layout_v<decltype(IsolateData::Name##_)>); \
   static_assert(offsetof(IsolateData, Name##_) == k##PureName##Offset);
   ISOLATE_DATA_FIELDS(V)
 #undef V

@@ -979,8 +979,8 @@ class TSReducerBase : public Next {
 
   template <class Op, class... Args>
   OpIndex Emit(Args... args) {
-    static_assert((std::is_base_of<Operation, Op>::value));
-    static_assert(!(std::is_same<Op, Operation>::value));
+    static_assert((std::is_base_of_v<Operation, Op>));
+    static_assert(!(std::is_same_v<Op, Operation>));
     DCHECK_NOT_NULL(Asm().current_block());
     OpIndex result = Asm().output_graph().next_operation_index();
     Op& op = Asm().output_graph().template Add<Op>(args...);
@@ -2661,6 +2661,17 @@ class TurboshaftAssemblerOpInterface
         BitcastSmiToWordPtr(input), kSmiShiftBits));
   }
 
+  V<WordPtr> LoadPageFlags(V<HeapObject> object) {
+    V<WordPtr> header = MemoryChunkFromAddress(BitcastTaggedToWordPtr(object));
+    return Load(header, {}, LoadOp::Kind::RawAligned(),
+                MemoryRepresentation::UintPtr(), MemoryChunk::FlagsOffset());
+  }
+
+  V<WordPtr> MemoryChunkFromAddress(V<WordPtr> address) {
+    return WordPtrBitwiseAnd(address,
+                             ~MemoryChunk::GetAlignmentMaskForAssembler());
+  }
+
   OpIndex AtomicRMW(V<WordPtr> base, V<WordPtr> index, OpIndex value,
                     AtomicRMWOp::BinOp bin_op,
                     RegisterRepresentation in_out_rep,
@@ -2982,11 +2993,6 @@ class TurboshaftAssemblerOpInterface
   V<Float64> LoadHeapNumberValue(V<HeapNumber> heap_number) {
     return __ template LoadField<HeapNumber, HeapNumber, Float64>(
         heap_number, AccessBuilderTS::ForHeapNumberValue());
-  }
-
-  V<Word32> LoadHeapInt32Value(V<HeapNumber> heap_number) {
-    return __ template LoadField<HeapNumber, HeapNumber, Word32>(
-        heap_number, AccessBuilderTS::ForHeapInt32Value());
   }
 
   template <typename Type = Object>
@@ -3407,7 +3413,8 @@ class TurboshaftAssemblerOpInterface
     DCHECK(frame_state.valid());
     auto arguments = std::apply(
         [](auto&&... as) {
-          return base::SmallVector<OpIndex, std::tuple_size_v<decltype(args)>>{
+          return base::SmallVector<
+              OpIndex, std::tuple_size_v<typename Descriptor::arguments_t>>{
               std::forward<decltype(as)>(as)...};
         },
         args);
@@ -3699,6 +3706,13 @@ class TurboshaftAssemblerOpInterface
                                      V<JSPrimitive> object) {
     return CallBuiltin<typename BuiltinCallDescriptor::ToObject>(
         isolate, context, {object});
+  }
+  void CallBuiltin_DetachContextCell(Isolate* isolate,
+                                     V<turboshaft::FrameState> frame_state,
+                                     V<Context> context, V<Object> new_value,
+                                     ConstOrV<WordPtr> index) {
+    CallBuiltin<typename BuiltinCallDescriptor::DetachContextCell>(
+        isolate, frame_state, {context, new_value, resolve(index)});
   }
   V<Context> CallBuiltin_FastNewFunctionContextFunction(
       Isolate* isolate, V<turboshaft::FrameState> frame_state,
@@ -4939,13 +4953,16 @@ class TurboshaftAssemblerOpInterface
   }
 
   V<WasmArray> WasmAllocateArray(V<Map> rtt, ConstOrV<Word32> length,
-                                 const wasm::ArrayType* array_type) {
-    return ReduceIfReachableWasmAllocateArray(rtt, resolve(length), array_type);
+                                 const wasm::ArrayType* array_type,
+                                 bool is_shared) {
+    return ReduceIfReachableWasmAllocateArray(rtt, resolve(length), array_type,
+                                              is_shared);
   }
 
   V<WasmStruct> WasmAllocateStruct(V<Map> rtt,
-                                   const wasm::StructType* struct_type) {
-    return ReduceIfReachableWasmAllocateStruct(rtt, struct_type);
+                                   const wasm::StructType* struct_type,
+                                   bool is_shared) {
+    return ReduceIfReachableWasmAllocateStruct(rtt, struct_type, is_shared);
   }
 
   V<WasmFuncRef> WasmRefFunc(V<Object> wasm_instance, uint32_t function_index) {

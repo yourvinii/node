@@ -49,7 +49,8 @@ enum InstanceType : uint16_t;
   V(Cell)                             \
   V(CodeWrapper)                      \
   V(ConsString)                       \
-  V(ContextSidePropertyCell)          \
+  V(ContextCell)                      \
+  V(CppHeapExternalObject)            \
   V(DataHandler)                      \
   V(DebugInfo)                        \
   V(EmbedderDataArray)                \
@@ -60,6 +61,7 @@ enum InstanceType : uint16_t;
   V(FreeSpace)                        \
   V(FunctionTemplateInfo)             \
   V(Hole)                             \
+  V(InterceptorInfo)                  \
   V(JSApiObject)                      \
   V(JSArrayBuffer)                    \
   V(JSDataViewOrRabGsabDataView)      \
@@ -98,7 +100,6 @@ enum InstanceType : uint16_t;
   V(ThinString)                       \
   V(TransitionArray)                  \
   IF_WASM(V, WasmArray)               \
-  IF_WASM(V, WasmContinuationObject)  \
   IF_WASM(V, WasmFuncRef)             \
   IF_WASM(V, WasmGlobalObject)        \
   IF_WASM(V, WasmInstanceObject)      \
@@ -106,8 +107,10 @@ enum InstanceType : uint16_t;
   IF_WASM(V, WasmMemoryObject)        \
   IF_WASM(V, WasmResumeData)          \
   IF_WASM(V, WasmStruct)              \
+  IF_WASM(V, WasmDescriptorOptions)   \
   IF_WASM(V, WasmSuspenderObject)     \
   IF_WASM(V, WasmSuspendingObject)    \
+  IF_WASM(V, WasmContinuationObject)  \
   IF_WASM(V, WasmTableObject)         \
   IF_WASM(V, WasmTagObject)           \
   IF_WASM(V, WasmTypeInfo)            \
@@ -265,7 +268,15 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   DECL_GETTER(GetIndexedInterceptor, Tagged<InterceptorInfo>)
 
   // Instance type.
-  DECL_PRIMITIVE_ACCESSORS(instance_type, InstanceType)
+  // Inline definition here to avoid a circular dependency in map-inl.h
+  // with instance-types-inl.h
+  inline InstanceType instance_type() const {
+    // TODO(solanes, v8:7790, v8:11353, v8:11945): Make this and the setter
+    // non-atomic when TSAN sees the map's store synchronization.
+    return static_cast<InstanceType>(
+        RELAXED_READ_UINT16_FIELD(*this, kInstanceTypeOffset));
+  }
+  inline void set_instance_type(InstanceType value);
 
   // Returns the size of the used in-object area including object header
   // (only used for JSObject in fast mode, for the other kinds of objects it

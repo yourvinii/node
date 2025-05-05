@@ -173,11 +173,13 @@ class RuntimeCallTimer final {
   V(FunctionTemplate_NewRemoteInstance)                    \
   V(FunctionTemplate_NewWithCache)                         \
   V(FunctionTemplate_NewWithFastHandler)                   \
+  V(CppHeapExternal_New)                                   \
   V(Int16Array_New)                                        \
   V(Int32Array_New)                                        \
   V(Int8Array_New)                                         \
   V(Isolate_DateTimeConfigurationChangeNotification)       \
   V(Isolate_LocaleConfigurationChangeNotification)         \
+  V(Isolate_ValidateAndCanonicalizeUnicodeLocaleId)        \
   V(JSON_Parse)                                            \
   V(JSON_Stringify)                                        \
   V(Map_AsArray)                                           \
@@ -383,7 +385,7 @@ class RuntimeCallTimer final {
                               TurboshaftCsaEarlyMachineOptimization)          \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftCsaLateEscapeAnalysis)   \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftCsaLoadElimination)      \
-  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftCsaOptimize)             \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftCsaMemoryOptimization)   \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftDebugFeatureLowering)    \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize,                                    \
                               TurboshaftDecompressionOptimization)            \
@@ -441,14 +443,14 @@ class RuntimeCallTimer final {
   V(BoundFunctionNameGetter)                   \
   V(CodeGenerationFromStringsCallbacks)        \
   V(CompileBackgroundBaseline)                 \
+  V(CompileBackgroundBaselineBuild)            \
   V(CompileBackgroundBaselinePreVisit)         \
   V(CompileBackgroundBaselineVisit)            \
-  V(CompileBackgroundBaselineBuild)            \
   V(CompileBaseline)                           \
+  V(CompileBaselineBuild)                      \
   V(CompileBaselineFinalization)               \
   V(CompileBaselinePreVisit)                   \
   V(CompileBaselineVisit)                      \
-  V(CompileBaselineBuild)                      \
   V(CompileCollectSourcePositions)             \
   V(CompileDeserialize)                        \
   V(CompileEnqueueOnDispatcher)                \
@@ -515,11 +517,11 @@ class RuntimeCallTimer final {
   V(OptimizeConcurrentPrepare)                 \
   V(OptimizeFinalizePipelineJob)               \
   V(OptimizeHeapBrokerInitialization)          \
-  V(OptimizeNonConcurrent)                     \
-  V(OptimizeNonConcurrentMaglev)               \
   V(OptimizeRevectorizer)                      \
   V(OptimizeSerialization)                     \
   V(OptimizeSerializeMetadata)                 \
+  V(OptimizeSynchronous)                       \
+  V(OptimizeSynchronousMaglev)                 \
   V(ParseEval)                                 \
   V(ParseFunction)                             \
   V(PropertyCallback)                          \

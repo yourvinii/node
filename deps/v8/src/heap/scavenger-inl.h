@@ -12,7 +12,6 @@
 #include "src/heap/evacuation-allocator-inl.h"
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-visitor-inl.h"
-#include "src/heap/incremental-marking-inl.h"
 #include "src/heap/marking-state-inl.h"
 #include "src/heap/mutable-page-metadata.h"
 #include "src/heap/new-spaces.h"
@@ -71,10 +70,6 @@ bool Scavenger::MigrateObject(Tagged<Map> map, Tagged<HeapObject> source,
     heap()->OnMoveEvent(source, target, size);
   }
 
-  if (is_incremental_marking_ &&
-      (promotion_heap_choice != kPromoteIntoSharedHeap || mark_shared_heap_)) {
-    heap()->incremental_marking()->TransferColor(source, target);
-  }
   PretenuringHandler::UpdateAllocationSite(heap_, map, source, size,
                                            &local_pretenuring_feedback_);
 
@@ -85,8 +80,8 @@ template <typename THeapObjectSlot>
 CopyAndForwardResult Scavenger::SemiSpaceCopyObject(
     Tagged<Map> map, THeapObjectSlot slot, Tagged<HeapObject> object,
     int object_size, ObjectFields object_fields) {
-  static_assert(std::is_same<THeapObjectSlot, FullHeapObjectSlot>::value ||
-                    std::is_same<THeapObjectSlot, HeapObjectSlot>::value,
+  static_assert(std::is_same_v<THeapObjectSlot, FullHeapObjectSlot> ||
+                    std::is_same_v<THeapObjectSlot, HeapObjectSlot>,
                 "Only FullHeapObjectSlot and HeapObjectSlot are expected here");
   DCHECK(heap()->AllowedToBeMigrated(map, object, NEW_SPACE));
   AllocationAlignment alignment = HeapObject::RequiredAlignment(map);
@@ -125,8 +120,8 @@ CopyAndForwardResult Scavenger::PromoteObject(Tagged<Map> map,
                                               Tagged<HeapObject> object,
                                               int object_size,
                                               ObjectFields object_fields) {
-  static_assert(std::is_same<THeapObjectSlot, FullHeapObjectSlot>::value ||
-                    std::is_same<THeapObjectSlot, HeapObjectSlot>::value,
+  static_assert(std::is_same_v<THeapObjectSlot, FullHeapObjectSlot> ||
+                    std::is_same_v<THeapObjectSlot, HeapObjectSlot>,
                 "Only FullHeapObjectSlot and HeapObjectSlot are expected here");
   DCHECK_GE(object_size, Heap::kMinObjectSizeInTaggedWords * kTaggedSize);
   AllocationAlignment alignment = HeapObject::RequiredAlignment(map);
@@ -155,9 +150,7 @@ CopyAndForwardResult Scavenger::PromoteObject(Tagged<Map> map,
     }
     UpdateHeapObjectReferenceSlot(slot, target);
 
-    // During incremental marking we want to push every object in order to
-    // record slots for map words. Necessary for map space compaction.
-    if (object_fields == ObjectFields::kMaybePointers || is_compacting_) {
+    if (object_fields == ObjectFields::kMaybePointers) {
       local_promoted_list_.Push({target, map, object_size});
     }
     promoted_size_ += object_size;
@@ -196,8 +189,8 @@ template <typename THeapObjectSlot,
 SlotCallbackResult Scavenger::EvacuateObjectDefault(
     Tagged<Map> map, THeapObjectSlot slot, Tagged<HeapObject> object,
     int object_size, ObjectFields object_fields) {
-  static_assert(std::is_same<THeapObjectSlot, FullHeapObjectSlot>::value ||
-                    std::is_same<THeapObjectSlot, HeapObjectSlot>::value,
+  static_assert(std::is_same_v<THeapObjectSlot, FullHeapObjectSlot> ||
+                    std::is_same_v<THeapObjectSlot, HeapObjectSlot>,
                 "Only FullHeapObjectSlot and HeapObjectSlot are expected here");
   SLOW_DCHECK(object->SizeFromMap(map) == object_size);
   CopyAndForwardResult result;
@@ -242,8 +235,8 @@ SlotCallbackResult Scavenger::EvacuateThinString(Tagged<Map> map,
                                                  THeapObjectSlot slot,
                                                  Tagged<ThinString> object,
                                                  int object_size) {
-  static_assert(std::is_same<THeapObjectSlot, FullHeapObjectSlot>::value ||
-                    std::is_same<THeapObjectSlot, HeapObjectSlot>::value,
+  static_assert(std::is_same_v<THeapObjectSlot, FullHeapObjectSlot> ||
+                    std::is_same_v<THeapObjectSlot, HeapObjectSlot>,
                 "Only FullHeapObjectSlot and HeapObjectSlot are expected here");
   if (shortcut_strings_) {
     // The ThinString should die after Scavenge, so avoid writing the proper
@@ -267,8 +260,8 @@ template <typename THeapObjectSlot>
 SlotCallbackResult Scavenger::EvacuateShortcutCandidate(
     Tagged<Map> map, THeapObjectSlot slot, Tagged<ConsString> object,
     int object_size) {
-  static_assert(std::is_same<THeapObjectSlot, FullHeapObjectSlot>::value ||
-                    std::is_same<THeapObjectSlot, HeapObjectSlot>::value,
+  static_assert(std::is_same_v<THeapObjectSlot, FullHeapObjectSlot> ||
+                    std::is_same_v<THeapObjectSlot, HeapObjectSlot>,
                 "Only FullHeapObjectSlot and HeapObjectSlot are expected here");
   DCHECK(IsShortcutCandidate(map->instance_type()));
 
@@ -322,8 +315,8 @@ template <typename THeapObjectSlot>
 SlotCallbackResult Scavenger::EvacuateObject(THeapObjectSlot slot,
                                              Tagged<Map> map,
                                              Tagged<HeapObject> source) {
-  static_assert(std::is_same<THeapObjectSlot, FullHeapObjectSlot>::value ||
-                    std::is_same<THeapObjectSlot, HeapObjectSlot>::value,
+  static_assert(std::is_same_v<THeapObjectSlot, FullHeapObjectSlot> ||
+                    std::is_same_v<THeapObjectSlot, HeapObjectSlot>,
                 "Only FullHeapObjectSlot and HeapObjectSlot are expected here");
   SLOW_DCHECK(Heap::InFromPage(source));
   SLOW_DCHECK(!MapWord::FromMap(map).IsForwardingAddress());
@@ -359,8 +352,8 @@ SlotCallbackResult Scavenger::EvacuateObject(THeapObjectSlot slot,
 template <typename THeapObjectSlot>
 SlotCallbackResult Scavenger::ScavengeObject(THeapObjectSlot p,
                                              Tagged<HeapObject> object) {
-  static_assert(std::is_same<THeapObjectSlot, FullHeapObjectSlot>::value ||
-                    std::is_same<THeapObjectSlot, HeapObjectSlot>::value,
+  static_assert(std::is_same_v<THeapObjectSlot, FullHeapObjectSlot> ||
+                    std::is_same_v<THeapObjectSlot, HeapObjectSlot>,
                 "Only FullHeapObjectSlot and HeapObjectSlot are expected here");
   DCHECK(Heap::InFromPage(object));
 
@@ -413,8 +406,8 @@ SlotCallbackResult Scavenger::ScavengeObject(THeapObjectSlot p,
 template <typename TSlot>
 SlotCallbackResult Scavenger::CheckAndScavengeObject(Heap* heap, TSlot slot) {
   static_assert(
-      std::is_same<TSlot, FullMaybeObjectSlot>::value ||
-          std::is_same<TSlot, MaybeObjectSlot>::value,
+      std::is_same_v<TSlot, FullMaybeObjectSlot> ||
+          std::is_same_v<TSlot, MaybeObjectSlot>,
       "Only FullMaybeObjectSlot and MaybeObjectSlot are expected here");
   using THeapObjectSlot = typename TSlot::THeapObjectSlot;
   Tagged<MaybeObject> object = *slot;
@@ -457,6 +450,8 @@ class ScavengeVisitor final : public NewSpaceVisitor<ScavengeVisitor> {
                                       MaybeObjectSize);
   V8_INLINE size_t VisitJSApiObject(Tagged<Map> map, Tagged<JSObject> object,
                                     MaybeObjectSize);
+  V8_INLINE size_t VisitCppHeapExternalObject(
+      Tagged<Map> map, Tagged<CppHeapExternalObject> object, MaybeObjectSize);
   V8_INLINE void VisitExternalPointer(Tagged<HeapObject> host,
                                       ExternalPointerSlot slot);
 
@@ -537,20 +532,19 @@ size_t ScavengeVisitor::VisitJSApiObject(Tagged<Map> map,
   return size;
 }
 
+size_t ScavengeVisitor::VisitCppHeapExternalObject(
+    Tagged<Map> map, Tagged<CppHeapExternalObject> object, MaybeObjectSize) {
+  int size = CppHeapExternalObject::BodyDescriptor::SizeOf(map, object);
+  CppHeapExternalObject::BodyDescriptor::IterateBody(map, object, size, this);
+  return size;
+}
+
 void ScavengeVisitor::VisitExternalPointer(Tagged<HeapObject> host,
                                            ExternalPointerSlot slot) {
 #ifdef V8_COMPRESS_POINTERS
   DCHECK(!slot.tag_range().IsEmpty());
   DCHECK(!IsSharedExternalPointerType(slot.tag_range()));
   DCHECK(HeapLayout::InYoungGeneration(host));
-
-  // If an incremental mark is in progress, there is already a whole-heap trace
-  // running that will mark live EPT entries, and the scavenger won't sweep the
-  // young EPT space.  So, leave the tracing and sweeping work to the impending
-  // major GC.
-  //
-  // The EPT entry may or may not be marked already by the incremental marker.
-  if (scavenger_->is_incremental_marking_) return;
 
   // TODO(chromium:337580006): Remove when pointer compression always uses
   // EPT.

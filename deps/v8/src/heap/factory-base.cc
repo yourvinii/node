@@ -99,8 +99,7 @@ Handle<Code> FactoryBase<Impl>::NewCode(const NewCodeOptions& options) {
   code->set_handler_table_offset(options.handler_table_offset);
   code->set_constant_pool_offset(options.constant_pool_offset);
   code->set_code_comments_offset(options.code_comments_offset);
-  code->set_builtin_jump_table_info_offset(
-      options.builtin_jump_table_info_offset);
+  code->set_jump_table_info_offset(options.jump_table_info_offset);
   code->set_unwinding_info_offset(options.unwinding_info_offset);
   code->set_parameter_count(options.parameter_count);
 #ifdef V8_ENABLE_LEAPTIERING
@@ -195,9 +194,9 @@ Handle<TrustedFixedArray> FactoryBase<Impl>::NewTrustedFixedArray(
 
 template <typename Impl>
 Handle<ProtectedFixedArray> FactoryBase<Impl>::NewProtectedFixedArray(
-    int length) {
+    int length, bool shared) {
   if (length == 0) return empty_protected_fixed_array();
-  return ProtectedFixedArray::New(isolate(), length);
+  return ProtectedFixedArray::New(isolate(), length, shared);
 }
 
 template <typename Impl>
@@ -1062,6 +1061,19 @@ Handle<String> FactoryBase<Impl>::HeapNumberToString(
 template <typename Impl>
 inline Handle<String> FactoryBase<Impl>::SmiToString(Tagged<Smi> number,
                                                      NumberCacheMode mode) {
+  // LINT.IfChange(CheckPreallocatedNumberStrings)
+  {
+    DCHECK_EQ(kPreallocatedNumberStringTableSize,
+              preallocated_number_string_table()->length());
+    int index = number.value();
+    if (static_cast<unsigned>(index) < kPreallocatedNumberStringTableSize) {
+      return handle(
+          Cast<String>(preallocated_number_string_table()->get(index)),
+          isolate());
+    }
+  }
+  // LINT.ThenChange(/src/codegen/code-stub-assembler.cc:CheckPreallocatedNumberStrings)
+
   int hash = mode == NumberCacheMode::kIgnore
                  ? 0
                  : impl()->NumberToStringCacheHash(number);
@@ -1072,9 +1084,7 @@ inline Handle<String> FactoryBase<Impl>::SmiToString(Tagged<Smi> number,
   }
 
   Handle<String> result;
-  if (number == Smi::zero()) {
-    result = zero_string();
-  } else {
+  {
     char arr[kNumberToStringBufferSize];
     base::Vector<char> buffer(arr, arraysize(arr));
     std::string_view string = IntToStringView(number.value(), buffer);

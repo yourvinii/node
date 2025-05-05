@@ -255,6 +255,13 @@ bool ShouldUseMegamorphicAccessBuiltin(FeedbackSource const& source,
 
 }  // namespace
 
+void JSGenericLowering::LowerJSDetachContextCell(Node* node) {
+  DCHECK_EQ(IrOpcode::kJSDetachContextCell, node->opcode());
+  int index = OpParameter<int>(node->op());
+  node->ReplaceInput(2, jsgraph()->IntPtrConstant(index));
+  ReplaceWithBuiltinCall(node, Builtin::kDetachContextCell);
+}
+
 void JSGenericLowering::LowerJSHasProperty(Node* node) {
   JSHasPropertyNode n(node);
   const PropertyAccess& p = n.Parameters();
@@ -591,19 +598,19 @@ void JSGenericLowering::LowerJSHasContextExtension(Node* node) {
   UNREACHABLE();  // Eliminated in typed lowering.
 }
 
+void JSGenericLowering::LowerJSLoadContextNoCell(Node* node) {
+  UNREACHABLE();  // Eliminated in typed lowering.
+}
+
 void JSGenericLowering::LowerJSLoadContext(Node* node) {
   UNREACHABLE();  // Eliminated in typed lowering.
 }
 
-void JSGenericLowering::LowerJSLoadScriptContext(Node* node) {
+void JSGenericLowering::LowerJSStoreContextNoCell(Node* node) {
   UNREACHABLE();  // Eliminated in typed lowering.
 }
 
 void JSGenericLowering::LowerJSStoreContext(Node* node) {
-  UNREACHABLE();  // Eliminated in typed lowering.
-}
-
-void JSGenericLowering::LowerJSStoreScriptContext(Node* node) {
   UNREACHABLE();  // Eliminated in context specialization.
 }
 
@@ -1168,7 +1175,7 @@ void JSGenericLowering::LowerJSGeneratorRestoreContinuation(Node* node) {
   UNREACHABLE();  // Eliminated in typed lowering.
 }
 
-void JSGenericLowering::LowerJSGeneratorRestoreContext(Node* node) {
+void JSGenericLowering::LowerJSGeneratorRestoreContextNoCell(Node* node) {
   UNREACHABLE();  // Eliminated in typed lowering.
 }
 

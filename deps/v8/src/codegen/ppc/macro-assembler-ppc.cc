@@ -157,7 +157,7 @@ void MacroAssembler::LoadRootRelative(Register destination, int32_t offset) {
 }
 
 void MacroAssembler::StoreRootRelative(int32_t offset, Register value) {
-  StoreU64(value, MemOperand(kRootRegister, offset));
+  StoreU64(value, MemOperand(kRootRegister, offset), r0);
 }
 
 void MacroAssembler::LoadRootRegisterOffset(Register destination,
@@ -1646,7 +1646,7 @@ void MacroAssembler::LeaveExitFrame(Register scratch) {
   LoadU64(cp, ExternalReferenceAsOperand(context_address, no_reg));
 
 #ifdef DEBUG
-  mov(scratch, Operand(Context::kInvalidContext));
+  mov(scratch, Operand(Context::kNoContext));
   StoreU64(scratch, ExternalReferenceAsOperand(context_address, no_reg));
 #endif
 

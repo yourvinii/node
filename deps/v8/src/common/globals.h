@@ -255,11 +255,12 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 #define V8_EXTERNAL_CODE_SPACE_BOOL false
 #endif
 
-// Support for builtin jump table disassembly.
-#if defined(V8_ENABLE_BUILTIN_JUMP_TABLE_SWITCH) && defined(ENABLE_DISASSEMBLER)
-#define V8_BUILTIN_JUMP_TABLE_INFO_BOOL true
+// Support for jump table disassembly.
+#if defined(ENABLE_DISASSEMBLER) && \
+    (defined(V8_TARGET_ARCH_ARM64) || defined(V8_TARGET_ARCH_X64))
+#define V8_JUMP_TABLE_INFO_BOOL true
 #else
-#define V8_BUILTIN_JUMP_TABLE_INFO_BOOL false
+#define V8_JUMP_TABLE_INFO_BOOL false
 #endif
 
 // V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT controls how V8 sets permissions for
@@ -311,16 +312,6 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 #define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT true
 #else
 #define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT false
-#endif
-
-// Enable hardware features to make the sandbox memory temporarily inaccessible.
-// This is currently only used with pkeys and in debug mode.
-// TODO(sroettger): add a gn arg to toggle this once we enable it in non-debug
-//                  builds.
-#if V8_HAS_PKU_JIT_WRITE_PROTECT && defined(V8_ENABLE_SANDBOX) && defined(DEBUG)
-#define V8_ENABLE_SANDBOX_HARDWARE_SUPPORT true
-#else
-#define V8_ENABLE_SANDBOX_HARDWARE_SUPPORT false
 #endif
 
 // Determine whether tagged pointers are 8 bytes (used in Torque layouts for
@@ -802,7 +793,7 @@ enum class StoreOrigin { kMaybeKeyed, kNamed };
 
 enum class TypeofMode { kInside, kNotInside };
 
-enum class ContextKind { kDefault, kScriptContext };
+enum class ContextMode { kNoContextCells, kHasContextCells };
 
 // Whether floating point registers should be saved (and restored).
 enum class SaveFPRegsMode { kIgnore, kSave };
@@ -1453,9 +1444,10 @@ enum class GarbageCollectionReason : int {
   kMeasureMemory = 24,
   kBackgroundAllocationFailure = 25,
   kFinalizeConcurrentMinorMS = 26,
-  kCppHeapAllocationFailure = 27,
-  kFrozen = 28,
-  kIdleContextDisposal = 29,
+  kFinalizeMinorMSForMajorGC = 27,
+  kCppHeapAllocationFailure = 28,
+  kFrozen = 29,
+  kIdleContextDisposal = 30,
 
   NUM_REASONS,
 };
@@ -1520,6 +1512,8 @@ constexpr const char* ToString(GarbageCollectionReason reason) {
       return "background allocation failure";
     case GarbageCollectionReason::kFinalizeConcurrentMinorMS:
       return "finalize concurrent MinorMS";
+    case GarbageCollectionReason::kFinalizeMinorMSForMajorGC:
+      return "finalize MinorMS for major GC";
     case GarbageCollectionReason::kCppHeapAllocationFailure:
       return "CppHeap allocation failure";
     case GarbageCollectionReason::kFrozen:
@@ -2681,19 +2675,19 @@ inline KeyedAccessLoadMode CreateKeyedAccessLoadMode(bool handle_oob,
 
 inline KeyedAccessLoadMode GeneralizeKeyedAccessLoadMode(
     KeyedAccessLoadMode mode1, KeyedAccessLoadMode mode2) {
-  using T = std::underlying_type<KeyedAccessLoadMode>::type;
+  using T = std::underlying_type_t<KeyedAccessLoadMode>;
   return static_cast<KeyedAccessLoadMode>(static_cast<T>(mode1) |
                                           static_cast<T>(mode2));
 }
 
 inline bool LoadModeHandlesOOB(KeyedAccessLoadMode load_mode) {
-  using T = std::underlying_type<KeyedAccessLoadMode>::type;
+  using T = std::underlying_type_t<KeyedAccessLoadMode>;
   return (static_cast<T>(load_mode) &
           static_cast<T>(KeyedAccessLoadMode::kHandleOOB)) != 0;
 }
 
 inline bool LoadModeHandlesHoles(KeyedAccessLoadMode load_mode) {
-  using T = std::underlying_type<KeyedAccessLoadMode>::type;
+  using T = std::underlying_type_t<KeyedAccessLoadMode>;
   return (static_cast<T>(load_mode) &
           static_cast<T>(KeyedAccessLoadMode::kHandleHoles)) != 0;
 }
@@ -2897,6 +2891,8 @@ constexpr uint64_t kInvalidWasmSignatureHash = ~uint64_t{0};
 
 enum class CallJumpMode { kCall, kTailCall };
 
+constexpr int kPreallocatedNumberStringTableSize = 100;
+
 }  // namespace internal
 
 // Tag dispatching support for atomic loads and stores.
@@ -2910,6 +2906,8 @@ static constexpr RelaxedLoadTag kRelaxedLoad;
 static constexpr ReleaseStoreTag kReleaseStore;
 static constexpr RelaxedStoreTag kRelaxedStore;
 static constexpr SeqCstAccessTag kSeqCstAccess;
+
+static constexpr int kAdd_LhsIsStringConstant_Internalize_CacheSlotOffset = 1;
 
 }  // namespace v8
 

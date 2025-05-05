@@ -115,6 +115,7 @@
       'V8 Linux - arm64 - sim - MSAN - builder': 'release_simulate_arm64_msan',
       # FYI.
       'V8 iOS - sim - builder': 'release_x64_ios_simulator',
+      'V8 Linux64 - arm64 - ASAN - builder': 'release_arm64_asan',
       'V8 Linux64 - arm64 - builder': 'release_arm64',
       'V8 Linux64 - arm64 - debug builder': 'debug_arm64',
       'V8 Linux64 - arm64 - sim - no pointer compression - builder':
@@ -265,6 +266,7 @@
       'v8_linux_gc_stress_compile_dbg': 'debug_x86_trybot',
       'v8_linux_shared_compile_rel': 'release_x86_shared_verify_heap',
       'v8_linux_vtunejit': 'debug_x86_vtunejit',
+      'v8_linux64_arm64_asan_compile_rel': 'release_arm64_asan',
       'v8_linux64_arm64_compile_dbg': 'debug_arm64_trybot',
       'v8_linux64_arm64_compile_rel': 'release_arm64_trybot',
       'v8_linux64_native_arm64_no_pointer_compression_compile_rel': 'release_arm64_no_pointer_compression_trybot',
@@ -299,8 +301,8 @@
       'v8_linux64_no_sandbox_compile_rel': 'release_x64_no_sandbox',
       'v8_linux64_official_compile_rel': 'official_x64_on_release_branch',
       'v8_linux64_predictable_compile_rel': 'release_x64_predictable',
-      'v8_linux64_pku_compile_dbg': 'debug_x64',
-      'v8_linux64_pku_compile_rel': 'release_x64',
+      'v8_linux64_pku_compile_dbg': 'debug_x64_sandbox_hardware_support',
+      'v8_linux64_pku_compile_rel': 'release_x64_sandbox_hardware_support',
       'v8_linux64_shared_compile_rel': 'release_x64_shared_verify_heap',
       'v8_linux64_single_generation_compile_dbg': 'debug_x64_single_generation',
       'v8_linux64_no_wasm_compile_rel': 'release_x64_webassembly_disabled',
@@ -535,6 +537,8 @@
       'release_bot', 'arm', 'hard_float'],
     'release_arm64': [
       'release_bot', 'arm64'],
+    'release_arm64_asan': [
+      'release_bot', 'arm64', 'asan'],
     'release_arm64_no_pointer_compression': [
       'release_bot', 'arm64', 'v8_disable_pointer_compression'],
     'release_arm64_trybot': [
@@ -603,7 +607,7 @@
       'release_bot', 'x64', 'asan', 'lsan', 'symbolized',
       'v8_verify_heap', 'v8_enable_turboshaft_csa'],
     'release_x64_cet_shadow_stack': [
-      'release_bot', 'x64', 'cet_shadow_stack'],
+      'release_bot', 'x64', 'cet_shadow_stack', 'use_siso'],
     'release_x64_cfi': [
       'release_bot', 'x64', 'cfi'],
     'release_x64_cfi_clusterfuzz_turboshaft_csa': [
@@ -643,6 +647,8 @@
       'release_bot_reclient', 'x64'],
     'release_x64_no_sandbox': [
       'release_bot', 'x64', 'no_sandbox'],
+    'release_x64_sandbox_hardware_support': [
+      'release_bot', 'x64', 'sandbox_hardware_support'],
     'release_x64_trybot': [
       'release_trybot', 'x64'],
     'release_x64_test_features_gcmole_trybot': [
@@ -721,6 +727,8 @@
       'debug_bot', 'x64', 'perfetto'],
     'debug_x64_no_sandbox': [
       'debug_bot', 'x64', 'no_sandbox'],
+    'debug_x64_sandbox_hardware_support': [
+      'debug_bot', 'x64', 'sandbox_hardware_support'],
     'debug_x64_single_generation': [
       'debug_bot', 'x64', 'v8_enable_single_generation'],
     'debug_x64_sticky_mark_bits': [
@@ -853,7 +861,7 @@
     },
 
     'conservative_stack_scanning': {
-      'gn_args': 'v8_enable_conservative_stack_scanning=true',
+      'gn_args': 'v8_enable_direct_handle=true',
     },
 
     'dcheck_always_on': {
@@ -958,6 +966,10 @@
 
     'no_sandbox': {
       'gn_args': 'v8_enable_sandbox=false',
+    },
+
+    'sandbox_hardware_support': {
+      'gn_args': 'v8_enable_sandbox_hardware_support=true',
     },
 
     'non_default_cppgc': {
@@ -1066,6 +1078,10 @@
 
     'use_centipede': {
       'gn_args': 'use_centipede=true optimize_for_fuzzing = true',
+    },
+
+    'use_siso': {
+      'gn_args': 'use_siso=true',
     },
 
     'v8_check_header_includes': {

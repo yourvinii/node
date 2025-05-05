@@ -3321,6 +3321,9 @@ void MacroAssembler::CallJSFunction(Register function_object,
   movl(r15, FieldOperand(function_object, JSFunction::kDispatchHandleOffset));
   LoadEntrypointAndParameterCountFromJSDispatchTable(rcx, rbx, r15);
   // Force a safe crash if the parameter count doesn't match.
+  // TODO(412398354): to avoid this runtime check, we should switch all
+  // remaining users to call the function via its dispatch handle instead. See
+  // CallJSDispatchEntry below and crbug.com/412398354 for more details.
   cmpl(rbx, Immediate(argument_count));
   SbxCheck(less_equal, AbortReason::kJSSignatureMismatch);
   call(rcx);
@@ -4497,7 +4500,7 @@ void MacroAssembler::LeaveExitFrame() {
   Operand context_operand = ExternalReferenceAsOperand(context_address);
   movq(rsi, context_operand);
 #ifdef DEBUG
-  Move(context_operand, Context::kInvalidContext);
+  Move(context_operand, Context::kNoContext);
 #endif
 
   // Clear the top frame.

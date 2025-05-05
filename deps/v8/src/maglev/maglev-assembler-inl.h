@@ -54,17 +54,15 @@ struct CopyForDeferredByValue {
 
 // Node pointers are copied by value.
 template <typename T>
-struct CopyForDeferredHelper<
-    T*, typename std::enable_if<std::is_base_of<NodeBase, T>::value>::type>
+struct CopyForDeferredHelper<T*,
+                             std::enable_if_t<std::is_base_of_v<NodeBase, T>>>
     : public CopyForDeferredByValue<T*> {};
 // Arithmetic values and enums are copied by value.
 template <typename T>
-struct CopyForDeferredHelper<
-    T, typename std::enable_if<std::is_arithmetic<T>::value>::type>
+struct CopyForDeferredHelper<T, std::enable_if_t<std::is_arithmetic_v<T>>>
     : public CopyForDeferredByValue<T> {};
 template <typename T>
-struct CopyForDeferredHelper<
-    T, typename std::enable_if<std::is_enum<T>::value>::type>
+struct CopyForDeferredHelper<T, std::enable_if_t<std::is_enum_v<T>>>
     : public CopyForDeferredByValue<T> {};
 // MaglevCompilationInfos are copied by value.
 template <>
@@ -114,8 +112,8 @@ struct CopyForDeferredHelper<FeedbackSlot>
     : public CopyForDeferredByValue<FeedbackSlot> {};
 // Heap Refs are copied by value.
 template <typename T>
-struct CopyForDeferredHelper<T, typename std::enable_if<std::is_base_of<
-                                    compiler::ObjectRef, T>::value>::type>
+struct CopyForDeferredHelper<
+    T, std::enable_if_t<std::is_base_of_v<compiler::ObjectRef, T>>>
     : public CopyForDeferredByValue<T> {};
 
 template <typename T>
@@ -282,6 +280,31 @@ inline void MaglevAssembler::SmiToDouble(DoubleRegister result, Register smi) {
   AssertSmi(smi);
   SmiUntag(smi);
   Int32ToDouble(result, smi);
+}
+
+inline void MaglevAssembler::AssertContextCellState(Register cell,
+                                                    ContextCell::State state,
+                                                    Condition condition) {
+  if (!v8_flags.slow_debug_code) return;
+  TemporaryRegisterScope temps(this);
+  Register scratch = temps.AcquireScratch();
+  LoadContextCellState(scratch, cell);
+  CompareInt32AndAssert(scratch, static_cast<int>(state), condition,
+                        AbortReason::kUnexpectedValue);
+}
+
+inline void MaglevAssembler::LoadContextCellTaggedValue(Register value,
+                                                        Register cell) {
+  static_assert(ContextCell::kConst == 0);
+  static_assert(ContextCell::kSmi == 1);
+  AssertContextCellState(cell, ContextCell::kSmi, kLessThanEqual);
+  LoadTaggedField(value, cell, offsetof(ContextCell, tagged_value_));
+}
+
+inline void MaglevAssembler::StoreContextCellSmiValue(Register cell,
+                                                      Register value) {
+  StoreTaggedFieldNoWriteBarrier(cell, offsetof(ContextCell, tagged_value_),
+                                 value);
 }
 
 #if !defined(V8_TARGET_ARCH_RISCV64)

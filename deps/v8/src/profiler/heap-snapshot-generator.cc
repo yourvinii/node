@@ -964,6 +964,8 @@ HeapEntry* V8HeapExplorer::AddEntry(Tagged<HeapObject> object) {
   } else if (InstanceTypeChecker::IsOddball(instance_type)) {
     Tagged<String> name = Cast<Oddball>(object)->to_string();
     return AddEntry(object, HeapEntry::kHidden, names_->GetName(name));
+  } else if (InstanceTypeChecker::IsCppHeapExternalObject(instance_type)) {
+    return AddEntry(object, HeapEntry::kObject, "system / CppHeapExternal");
   }
 #if V8_ENABLE_WEBASSEMBLY
   if (InstanceTypeChecker::IsWasmObject(instance_type)) {
@@ -1447,6 +1449,8 @@ void V8HeapExplorer::ExtractReferences(HeapEntry* entry,
     ExtractBytecodeArrayReferences(entry, Cast<BytecodeArray>(obj));
   } else if (IsScopeInfo(obj)) {
     ExtractScopeInfoReferences(entry, Cast<ScopeInfo>(obj));
+  } else if (IsCppHeapExternalObject(obj)) {
+    ExtractCppHeapExternalReferences(entry, Cast<CppHeapExternalObject>(obj));
 #if V8_ENABLE_WEBASSEMBLY
   } else if (IsWasmStruct(obj)) {
     ExtractWasmStructReferences(Cast<WasmStruct>(obj), entry);
@@ -1683,27 +1687,30 @@ void V8HeapExplorer::ExtractContextReferences(HeapEntry* entry,
     // Add context allocated locals.
     for (auto it : ScopeInfo::IterateLocalNames(scope_info, no_gc)) {
       int idx = scope_info->ContextHeaderLength() + it->index();
-      SetContextReference(entry, it->name(), context->get(idx),
+      SetContextReference(entry, it->name(), context->get(idx, kRelaxedLoad),
                           Context::OffsetOfElementAt(idx));
     }
     if (scope_info->HasContextAllocatedFunctionName()) {
       Tagged<String> name = Cast<String>(scope_info->FunctionName());
       int idx = scope_info->FunctionContextSlotIndex(name);
       if (idx >= 0) {
-        SetContextReference(entry, name, context->get(idx),
+        SetContextReference(entry, name, context->get(idx, kRelaxedLoad),
                             Context::OffsetOfElementAt(idx));
       }
     }
   }
 
   SetInternalReference(
-      entry, "scope_info", context->get(Context::SCOPE_INFO_INDEX),
+      entry, "scope_info",
+      context->get(Context::SCOPE_INFO_INDEX, kRelaxedLoad),
       FixedArray::OffsetOfElementAt(Context::SCOPE_INFO_INDEX));
-  SetInternalReference(entry, "previous", context->get(Context::PREVIOUS_INDEX),
+  SetInternalReference(entry, "previous",
+                       context->get(Context::PREVIOUS_INDEX, kRelaxedLoad),
                        FixedArray::OffsetOfElementAt(Context::PREVIOUS_INDEX));
   if (context->has_extension()) {
     SetInternalReference(
-        entry, "extension", context->get(Context::EXTENSION_INDEX),
+        entry, "extension",
+        context->get(Context::EXTENSION_INDEX, kRelaxedLoad),
         FixedArray::OffsetOfElementAt(Context::EXTENSION_INDEX));
   }
 
@@ -1713,7 +1720,7 @@ void V8HeapExplorer::ExtractContextReferences(HeapEntry* entry,
     for (size_t i = 0; i < arraysize(native_context_names); i++) {
       int index = native_context_names[i].index;
       const char* name = native_context_names[i].name;
-      SetInternalReference(entry, name, context->get(index),
+      SetInternalReference(entry, name, context->get(index, kRelaxedLoad),
                            FixedArray::OffsetOfElementAt(index));
     }
 
@@ -1871,9 +1878,9 @@ void V8HeapExplorer::ExtractAccessorInfoReferences(
 void V8HeapExplorer::ExtractAccessorPairReferences(
     HeapEntry* entry, Tagged<AccessorPair> accessors) {
   SetInternalReference(entry, "getter", accessors->getter(),
-                       AccessorPair::kGetterOffset);
+                       offsetof(AccessorPair, getter_));
   SetInternalReference(entry, "setter", accessors->setter(),
-                       AccessorPair::kSetterOffset);
+                       offsetof(AccessorPair, setter_));
 }
 
 void V8HeapExplorer::ExtractJSWeakRefReferences(HeapEntry* entry,
@@ -1982,14 +1989,14 @@ void V8HeapExplorer::ExtractPrototypeInfoReferences(
 
 void V8HeapExplorer::ExtractAllocationSiteReferences(
     HeapEntry* entry, Tagged<AllocationSite> site) {
-  SetInternalReference(entry, "transition_info",
-                       site->transition_info_or_boilerplate(),
-                       AllocationSite::kTransitionInfoOrBoilerplateOffset);
+  SetInternalReference(
+      entry, "transition_info", site->transition_info_or_boilerplate(),
+      offsetof(AllocationSite, transition_info_or_boilerplate_));
   SetInternalReference(entry, "nested_site", site->nested_site(),
-                       AllocationSite::kNestedSiteOffset);
+                       offsetof(AllocationSite, nested_site_));
   TagObject(site->dependent_code(), "(dependent code)", HeapEntry::kCode);
   SetInternalReference(entry, "dependent_code", site->dependent_code(),
-                       AllocationSite::kDependentCodeOffset);
+                       offsetof(AllocationSite, dependent_code_));
 }
 
 void V8HeapExplorer::ExtractArrayBoilerplateDescriptionReferences(
@@ -2286,6 +2293,11 @@ void V8HeapExplorer::ExtractInternalReferences(Tagged<JSObject> js_obj,
     Tagged<Object> o = js_obj->GetEmbedderField(i);
     SetInternalReference(entry, i, o, js_obj->GetEmbedderFieldOffset(i));
   }
+}
+
+void V8HeapExplorer::ExtractCppHeapExternalReferences(
+    HeapEntry* entry, Tagged<CppHeapExternalObject> obj) {
+  generator_->GetCppHeapExternalObjects().insert(obj);
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -2622,7 +2634,7 @@ bool V8HeapExplorer::IsEssentialObject(Tagged<Object> object) {
 bool V8HeapExplorer::IsEssentialHiddenReference(Tagged<Object> parent,
                                                 int field_offset) {
   if (IsAllocationSite(parent) &&
-      field_offset == AllocationSite::kWeakNextOffset)
+      field_offset == offsetof(AllocationSiteWithWeakNext, weak_next_))
     return false;
   if (IsContext(parent) &&
       field_offset == Context::OffsetOfElementAt(Context::NEXT_CONTEXT_LINK))
@@ -3174,7 +3186,8 @@ bool NativeObjectsExplorer::IterateAndExtractReferences(
     v8::HandleScope scope(reinterpret_cast<v8::Isolate*>(isolate_));
     DisallowGarbageCollection no_gc;
     EmbedderGraphImpl graph;
-    snapshot_->profiler()->BuildEmbedderGraph(isolate_, &graph);
+    snapshot_->profiler()->BuildEmbedderGraph(
+        isolate_, &graph, generator_->TakeCppHeapExternalObjects());
     for (const auto& node : graph.nodes()) {
       // Only add embedder nodes as V8 nodes have been added already by the
       // V8HeapExplorer.
@@ -3254,6 +3267,7 @@ bool HeapSnapshotGenerator::GenerateSnapshot() {
   EmbedderStackStateScope stack_scope(
       heap_, EmbedderStackStateOrigin::kImplicitThroughTask, stack_state_);
   heap_->CollectAllAvailableGarbage(GarbageCollectionReason::kHeapProfiler);
+  heap_->CompleteSweepingFull();
 
   // No allocation that could trigger GC from here onwards. We cannot use a
   // DisallowGarbageCollection scope as the HeapObjectIterator used during

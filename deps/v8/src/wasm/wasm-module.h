@@ -104,7 +104,7 @@ struct WasmGlobal {
 };
 
 // Note: An exception tag signature only uses the params portion of a function
-// signature.
+// signature. However, tags used for suspend/resume use both params and results.
 using WasmTagSig = FunctionSig;
 
 // Static representation of a wasm tag type.
@@ -737,6 +737,8 @@ struct V8_EXPORT_PRIVATE WasmModule {
   // Position and size of the name section (payload only, i.e. without section
   // ID and length).
   WireBytesRef name_section = {0, 0};
+  // Position and size of the descriptors section.
+  WireBytesRef descriptors_section = {0, 0};
   // Set by the singleton TypeNamesProvider to avoid duplicate work.
   mutable std::atomic<bool> canonical_typenames_decoded = false;
   // Set to true if this module has wasm-gc types in its type section.
@@ -872,9 +874,16 @@ struct V8_EXPORT_PRIVATE WasmModule {
     return types[index.index].function_sig;
   }
 
-  bool has_conttype(ModuleTypeIndex index) const {
+  bool has_cont_type(ModuleTypeIndex index) const {
     return index.index < types.size() &&
            types[index.index].kind == TypeDefinition::kCont;
+  }
+
+  const ContType* cont_type(ModuleTypeIndex index) const {
+    DCHECK(has_cont_type(index));
+    size_t num_types = types.size();
+    V8_ASSUME(index.index < num_types);
+    return types[index.index].cont_type;
   }
 
   CanonicalTypeIndex canonical_sig_id(ModuleTypeIndex index) const {
@@ -1038,7 +1047,7 @@ struct V8_EXPORT_PRIVATE ModuleWireBytes {
 
   // Checks the given reference is contained within the module bytes.
   bool BoundsCheck(WireBytesRef ref) const {
-    uint32_t size = static_cast<uint32_t>(module_bytes_.length());
+    size_t size = module_bytes_.size();
     return ref.offset() <= size && ref.length() <= size - ref.offset();
   }
 
@@ -1051,7 +1060,7 @@ struct V8_EXPORT_PRIVATE ModuleWireBytes {
   base::Vector<const uint8_t> module_bytes() const { return module_bytes_; }
   const uint8_t* start() const { return module_bytes_.begin(); }
   const uint8_t* end() const { return module_bytes_.end(); }
-  size_t length() const { return module_bytes_.length(); }
+  size_t length() const { return module_bytes_.size(); }
 
  private:
   base::Vector<const uint8_t> module_bytes_;

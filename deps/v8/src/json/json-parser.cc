@@ -319,7 +319,7 @@ JsonParser<Char>::JsonParser(Isolate* isolate, Handle<String> source)
     source_ = String::Flatten(isolate, source);
   }
 
-  if (StringShape(*source_, cage_base).IsExternal()) {
+  if (StringShape(*source_).IsExternal()) {
     chars_ =
         static_cast<const Char*>(Cast<SeqExternalString>(*source_)->GetChars());
     chars_may_relocate_ = false;
@@ -1477,6 +1477,144 @@ V8_INLINE MaybeHandle<Object> JsonParser<Char>::ParseJsonValueRecursive(
 }
 
 template <typename Char>
+bool JsonParser<Char>::FastKeyMatch(const uint8_t* key_chars,
+                                    uint32_t key_length) {
+  return key_length < remaining_chars() && *(cursor_ + key_length) == '"' &&
+         CompareCharsEqual(key_chars, cursor_, key_length);
+}
+
+template <typename Char>
+bool JsonParser<Char>::ParseJsonPropertyValue(const JsonString& key) {
+  ExpectNext(JsonToken::COLON,
+             MessageTemplate::kJsonParseExpectedColonAfterPropertyName);
+  Handle<Object> value;
+  if (V8_UNLIKELY(!ParseJsonValueRecursive().ToHandle(&value))) return false;
+  property_stack_.emplace_back(key, value);
+  return true;
+}
+
+namespace {
+
+const uint8_t* GetFastKeyChars(Isolate* isolate, Tagged<String> key,
+                               Tagged<Map> map,
+                               const DisallowGarbageCollection& no_gc) {
+  DCHECK(InstanceTypeChecker::IsOneByteString(map));
+#if V8_STATIC_ROOTS_BOOL
+  ReadOnlyRoots roots(isolate);
+  if (map == roots.internalized_one_byte_string_map()) {
+    return Cast<SeqOneByteString>(key)->GetChars(no_gc);
+  } else {
+    DCHECK(map == roots.external_internalized_one_byte_string_map() ||
+           map == roots.uncached_external_internalized_one_byte_string_map());
+    return Cast<ExternalOneByteString>(key)->GetChars();
+  }
+#else
+  InstanceType instance_type = map->instance_type();
+  switch (instance_type) {
+    case INTERNALIZED_ONE_BYTE_STRING_TYPE:
+      return Cast<SeqOneByteString>(key)->GetChars(no_gc);
+    case EXTERNAL_INTERNALIZED_ONE_BYTE_STRING_TYPE:
+    case UNCACHED_EXTERNAL_INTERNALIZED_ONE_BYTE_STRING_TYPE:
+      return Cast<ExternalOneByteString>(key)->GetChars();
+    default:
+      UNREACHABLE();
+  }
+#endif
+}
+
+}  // namespace
+
+template <typename Char>
+template <DescriptorArray::FastIterableState fast_iterable_state>
+bool JsonParser<Char>::ParseJsonObjectProperties(
+    JsonContinuation* cont, MessageTemplate first_token_msg,
+    Handle<DescriptorArray> descriptors) {
+  using FastIterableState = DescriptorArray::FastIterableState;
+  if constexpr (fast_iterable_state == FastIterableState::kJsonSlow) {
+    do {
+      ExpectNext(JsonToken::STRING, first_token_msg);
+      first_token_msg =
+          MessageTemplate::kJsonParseExpectedDoubleQuotedPropertyName;
+      JsonString key = ScanJsonPropertyKey(cont);
+      if (V8_UNLIKELY(!ParseJsonPropertyValue(key))) return false;
+    } while (Check(JsonToken::COMMA));
+  } else {
+    const uint16_t nof_descriptors = descriptors->number_of_descriptors();
+    DCHECK_GT(nof_descriptors, 0);
+    InternalIndex idx{0};
+    InternalIndex descriptors_end = InternalIndex{nof_descriptors};
+    do {
+      ExpectNext(JsonToken::STRING, first_token_msg);
+      first_token_msg =
+          MessageTemplate::kJsonParseExpectedDoubleQuotedPropertyName;
+      uint32_t key_length;
+      bool key_match;
+      {
+        DisallowGarbageCollection no_gc;
+        Tagged<String> expected_key = Cast<String>(descriptors->GetKey(idx));
+        Tagged<Map> key_map = expected_key->map();
+        if constexpr (fast_iterable_state == FastIterableState::kJsonFast) {
+          // Fast iterable keys are guaranteed to be 1-byte.
+          const uint8_t* expected_chars =
+              GetFastKeyChars(isolate_, expected_key, key_map, no_gc);
+          key_length = expected_key->length();
+          key_match = FastKeyMatch(expected_chars, key_length);
+        } else {
+          if (InstanceTypeChecker::IsOneByteString(key_map)) {
+            const uint8_t* expected_chars =
+                GetFastKeyChars(isolate_, expected_key, key_map, no_gc);
+            key_length = expected_key->length();
+            key_match = FastKeyMatch(expected_chars, key_length);
+          } else {
+            // Having a two-byte key means that we can't fast iterate the
+            // descriptor.
+            descriptors->set_fast_iterable(FastIterableState::kJsonSlow);
+            key_match = false;
+          }
+        }
+      }
+      if (V8_LIKELY(key_match)) {
+        JsonString key = JsonString(position(), key_length, false, true, false);
+        ++idx;
+        cursor_ += key_length + 1 /* double quote */;
+        if (V8_UNLIKELY(!ParseJsonPropertyValue(key))) return false;
+      } else {
+        JsonString key = ScanJsonPropertyKey(cont);
+        if (!key.is_index()) {
+          // Feedback doesn't match. Finish processing the current property
+          // and continue in slow-path if we have more properties.
+          if constexpr (fast_iterable_state == FastIterableState::kUnknown) {
+            if (key.has_escape()) {
+              descriptors->set_fast_iterable(FastIterableState::kJsonSlow);
+            }
+          }
+          if (V8_UNLIKELY(!ParseJsonPropertyValue(key))) return false;
+          if (Check(JsonToken::COMMA)) {
+            return ParseJsonObjectProperties<FastIterableState::kJsonSlow>(
+                cont, first_token_msg, {});
+          }
+          return true;
+        }
+        if (V8_UNLIKELY(!ParseJsonPropertyValue(key))) return false;
+      }
+    } while (idx < descriptors_end && Check(JsonToken::COMMA));
+    if constexpr (fast_iterable_state == FastIterableState::kUnknown) {
+      if (idx == descriptors_end) {
+        descriptors->set_fast_iterable_if(FastIterableState::kJsonFast,
+                                          FastIterableState::kUnknown);
+      }
+    }
+    // Additional, unknown properties. Scan them slow.
+    if (Check(JsonToken::COMMA)) {
+      return ParseJsonObjectProperties<FastIterableState::kJsonSlow>(
+          cont, first_token_msg, descriptors);
+    }
+  }
+
+  return true;
+}
+
+template <typename Char>
 MaybeHandle<Object> JsonParser<Char>::ParseJsonObject(Handle<Map> feedback) {
   {
     StackLimitCheck check(isolate_);
@@ -1492,20 +1630,39 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonObject(Handle<Map> feedback) {
 
   JsonContinuation cont(isolate_, JsonContinuation::kObjectProperty,
                         property_stack_.size());
-  bool first = true;
-  do {
-    ExpectNext(
-        JsonToken::STRING,
-        first ? MessageTemplate::kJsonParseExpectedPropNameOrRBrace
-              : MessageTemplate::kJsonParseExpectedDoubleQuotedPropertyName);
-    JsonString key = ScanJsonPropertyKey(&cont);
-    ExpectNext(JsonToken::COLON,
-               MessageTemplate::kJsonParseExpectedColonAfterPropertyName);
-    Handle<Object> value;
-    if (V8_UNLIKELY(!ParseJsonValueRecursive().ToHandle(&value))) return {};
-    property_stack_.emplace_back(key, value);
-    first = false;
-  } while (Check(JsonToken::COMMA));
+  bool success;
+  using FastIterableState = DescriptorArray::FastIterableState;
+  const MessageTemplate first_token_msg =
+      MessageTemplate::kJsonParseExpectedPropNameOrRBrace;
+  if (!feedback.is_null()) {
+    Handle<DescriptorArray> descriptors =
+        handle(feedback->instance_descriptors(), isolate_);
+    if (*descriptors == ReadOnlyRoots(isolate_).empty_descriptor_array()) {
+      success = ParseJsonObjectProperties<FastIterableState::kJsonSlow>(
+          &cont, first_token_msg, {});
+    } else {
+      switch (descriptors->fast_iterable()) {
+        case FastIterableState::kJsonFast:
+          success = ParseJsonObjectProperties<FastIterableState::kJsonFast>(
+              &cont, first_token_msg, descriptors);
+          break;
+        case FastIterableState::kJsonSlow:
+          success = ParseJsonObjectProperties<FastIterableState::kJsonSlow>(
+              &cont, first_token_msg, {});
+          break;
+        case FastIterableState::kUnknown:
+          success = ParseJsonObjectProperties<FastIterableState::kUnknown>(
+              &cont, first_token_msg, descriptors);
+          break;
+      }
+    }
+  } else {
+    success = ParseJsonObjectProperties<FastIterableState::kJsonSlow>(
+        &cont, first_token_msg, {});
+  }
+  if (V8_UNLIKELY(!success)) {
+    return {};
+  }
 
   Expect(JsonToken::RBRACE, MessageTemplate::kJsonParseExpectedCommaOrRBrace);
   Handle<Object> result = BuildJsonObject<false>(cont, feedback);
@@ -2155,43 +2312,49 @@ template <typename Char>
 template <typename SinkChar>
 void JsonParser<Char>::DecodeString(SinkChar* sink, uint32_t start,
                                     uint32_t length) {
-  SinkChar* sink_start = sink;
   const Char* cursor = chars_ + start;
-  while (true) {
-    const Char* end = cursor + length - (sink - sink_start);
-    cursor = std::find_if(cursor, end, [&sink](Char c) {
-      if (c == '\\') return true;
-      *sink++ = c;
-      return false;
-    });
+  while (length > 0) {
+    // Copy everything until the first escape character
+    const Char* backslash_pos = std::find(cursor, cursor + length, '\\');
+    size_t to_copy = backslash_pos - cursor;
+    std::copy_n(cursor, to_copy, sink);
+    length -= to_copy;
+    cursor += to_copy;
+    sink += to_copy;
 
-    if (cursor == end) return;
+    if (length == 0) return;
 
     cursor++;
 
     switch (GetEscapeKind(character_json_scan_flags[*cursor])) {
       case EscapeKind::kSelf:
         *sink++ = *cursor;
+        length--;
         break;
 
       case EscapeKind::kBackspace:
         *sink++ = '\x08';
+        length--;
         break;
 
       case EscapeKind::kTab:
         *sink++ = '\x09';
+        length--;
         break;
 
       case EscapeKind::kNewLine:
         *sink++ = '\x0A';
+        length--;
         break;
 
       case EscapeKind::kFormFeed:
         *sink++ = '\x0C';
+        length--;
         break;
 
       case EscapeKind::kCarriageReturn:
         *sink++ = '\x0D';
+        length--;
         break;
 
       case EscapeKind::kUnicode: {
@@ -2202,9 +2365,12 @@ void JsonParser<Char>::DecodeString(SinkChar* sink, uint32_t start,
         if (value <=
             static_cast<base::uc32>(unibrow::Utf16::kMaxNonSurrogateCharCode)) {
           *sink++ = value;
+          length--;
         } else {
+          SBXCHECK_GE(length, 2);
           *sink++ = unibrow::Utf16::LeadSurrogate(value);
           *sink++ = unibrow::Utf16::TrailSurrogate(value);
+          length -= 2;
         }
         break;
       }

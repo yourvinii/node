@@ -93,7 +93,8 @@ class WasmLoweringReducer : public Next {
         // (2) the object might be a Smi or
         // (3) the object might be a JS object.
         if (null_check_strategy_ == NullCheckStrategy::kExplicit ||
-            wasm::IsSubtypeOf(wasm::kWasmI31Ref.AsNonNull(), type, module_) ||
+            wasm::IsSubtypeOf(wasm::kWasmI31Ref.AsNonNull(), type.AsNonShared(),
+                              module_) ||
             !type.use_wasm_null()) {
           __ TrapIf(__ IsNull(object, type), trap_id);
         } else {
@@ -324,7 +325,8 @@ class WasmLoweringReducer : public Next {
   }
 
   V<WasmArray> REDUCE(WasmAllocateArray)(V<Map> rtt, V<Word32> length,
-                                         const wasm::ArrayType* array_type) {
+                                         const wasm::ArrayType* array_type,
+                                         bool is_shared) {
     __ TrapIfNot(
         __ Uint32LessThanOrEqual(
             length, __ Word32Constant(WasmArray::MaxLength(array_type))),
@@ -342,12 +344,15 @@ class WasmLoweringReducer : public Next {
     Uninitialized<WasmArray> a = __ template Allocate<WasmArray>(
         __ ChangeUint32ToUintPtr(__ Word32Add(
             padded_length, __ Word32Constant(WasmArray::kHeaderSize))),
-        AllocationType::kYoung);
+        is_shared ? AllocationType::kSharedOld : AllocationType::kYoung);
 
     // TODO(14108): The map and empty fixed array initialization should be an
     // immutable store.
-    __ InitializeField(a, AccessBuilder::ForMap(compiler::kNoWriteBarrier),
-                       rtt);
+    __ InitializeField(
+        a,
+        AccessBuilder::ForMap(is_shared ? compiler::kMapWriteBarrier
+                                        : compiler::kNoWriteBarrier),
+        rtt);
     __ InitializeField(a, AccessBuilder::ForJSObjectPropertiesOrHash(),
                        LOAD_ROOT(EmptyFixedArray));
     __ InitializeField(a, AccessBuilder::ForWasmArrayLength(), length);
@@ -358,13 +363,18 @@ class WasmLoweringReducer : public Next {
     return array;
   }
 
-  V<WasmStruct> REDUCE(WasmAllocateStruct)(
-      V<Map> rtt, const wasm::StructType* struct_type) {
+  V<WasmStruct> REDUCE(WasmAllocateStruct)(V<Map> rtt,
+                                           const wasm::StructType* struct_type,
+                                           bool is_shared) {
     int size = WasmStruct::Size(struct_type);
-    Uninitialized<WasmStruct> s =
-        __ template Allocate<WasmStruct>(size, AllocationType::kYoung);
-    __ InitializeField(s, AccessBuilder::ForMap(compiler::kNoWriteBarrier),
-                       rtt);
+    Uninitialized<WasmStruct> s = __ template Allocate<WasmStruct>(
+        size, is_shared ? AllocationType::kSharedOld : AllocationType::kYoung);
+    // Objects allocated into old-space need a write barrier for initialization.
+    __ InitializeField(
+        s,
+        AccessBuilder::ForMap(is_shared ? compiler::kMapWriteBarrier
+                                        : compiler::kNoWriteBarrier),
+        rtt);
     __ InitializeField(s, AccessBuilder::ForJSObjectPropertiesOrHash(),
                        LOAD_ROOT(EmptyFixedArray));
     // Note: Struct initialization isn't finished here, the user defined fields
@@ -563,13 +573,33 @@ class WasmLoweringReducer : public Next {
     }
   }
 
+  V<Word32> ObjectIsUnshared(V<HeapObject> object) {
+    V<WordPtr> flags = __ LoadPageFlags(object);
+    V<WordPtr> is_shared = __ WordPtrBitwiseAnd(
+        flags, static_cast<uintptr_t>(MemoryChunk::IN_WRITABLE_SHARED_SPACE));
+    return __ WordPtrEqual(is_shared, 0);
+  }
+
+  void RejectSharedWasmObjectsIfUnshared(V<HeapObject> object,
+                                         WasmTypeCheckConfig config,
+                                         Label<Word32>& result_label) {
+    if (!v8_flags.experimental_wasm_shared || config.to.is_shared() ||
+        config.from.heap_representation() != wasm::HeapType::kAny) {
+      return;
+    }
+    GOTO_IF_NOT(LIKELY(ObjectIsUnshared(object)), result_label,
+                __ Word32Constant(0));
+  }
+
+  // TODO(mliedtke): For WasmTypeCheckAbstract and WasmTypeCastAbstract make
+  // sure that the sharedness matches when casting from (unshared) any.
   V<Word32> ReduceWasmTypeCheckAbstract(V<Object> object,
                                         WasmTypeCheckConfig config) {
     const bool object_can_be_null = config.from.is_nullable();
     const bool null_succeeds = config.to.is_nullable();
     const bool object_can_be_i31 =
-        wasm::IsSubtypeOf(wasm::kWasmI31Ref.AsNonNull(), config.from,
-                          module_) ||
+        wasm::IsSubtypeOf(wasm::kWasmI31Ref.AsNonNull(),
+                          config.from.AsNonShared(), module_) ||
         config.from.heap_representation() == wasm::HeapType::kExtern;
 
     V<Word32> result;
@@ -581,7 +611,11 @@ class WasmLoweringReducer : public Next {
       if (to_rep == wasm::HeapType::kNone ||
           to_rep == wasm::HeapType::kNoExtern ||
           to_rep == wasm::HeapType::kNoFunc ||
-          to_rep == wasm::HeapType::kNoExn) {
+          to_rep == wasm::HeapType::kNoExn ||
+          to_rep == wasm::HeapType::kNoneShared ||
+          to_rep == wasm::HeapType::kNoExternShared ||
+          to_rep == wasm::HeapType::kNoFuncShared ||
+          to_rep == wasm::HeapType::kNoExnShared) {
         result = __ IsNull(object, config.from);
         break;
       }
@@ -594,16 +628,20 @@ class WasmLoweringReducer : public Next {
                 __ Word32Constant(kResult));
       }
       // i31 is special in that the Smi check is the last thing to do.
-      if (to_rep == wasm::HeapType::kI31) {
+      if (to_rep == wasm::HeapType::kI31 ||
+          to_rep == wasm::HeapType::kI31Shared) {
         // If earlier optimization passes reached the limit of possible graph
         // transformations, we could DCHECK(object_can_be_i31) here.
         result = object_can_be_i31 ? __ IsSmi(object) : __ Word32Constant(0);
         break;
       }
-      if (to_rep == wasm::HeapType::kEq) {
+      if (to_rep == wasm::HeapType::kEq ||
+          to_rep == wasm::HeapType::kEqShared) {
         if (object_can_be_i31) {
           GOTO_IF(UNLIKELY(__ IsSmi(object)), end_label, __ Word32Constant(1));
         }
+        RejectSharedWasmObjectsIfUnshared(V<HeapObject>::Cast(object), config,
+                                          end_label);
         result = IsDataRefMap(__ LoadMapField(object));
         break;
       }
@@ -611,11 +649,17 @@ class WasmLoweringReducer : public Next {
       if (object_can_be_i31) {
         GOTO_IF(UNLIKELY(__ IsSmi(object)), end_label, __ Word32Constant(0));
       }
-      if (to_rep == wasm::HeapType::kArray) {
+      if (to_rep == wasm::HeapType::kArray ||
+          to_rep == wasm::HeapType::kArrayShared) {
+        RejectSharedWasmObjectsIfUnshared(V<HeapObject>::Cast(object), config,
+                                          end_label);
         result = __ HasInstanceType(object, WASM_ARRAY_TYPE);
         break;
       }
-      if (to_rep == wasm::HeapType::kStruct) {
+      if (to_rep == wasm::HeapType::kStruct ||
+          to_rep == wasm::HeapType::kStructShared) {
+        RejectSharedWasmObjectsIfUnshared(V<HeapObject>::Cast(object), config,
+                                          end_label);
         result = __ HasInstanceType(object, WASM_STRUCT_TYPE);
         break;
       }
@@ -636,13 +680,22 @@ class WasmLoweringReducer : public Next {
     return final_result;
   }
 
+  void TrapOnSharedWasmObjectsIfUnshared(V<HeapObject> object,
+                                         WasmTypeCheckConfig config) {
+    if (!v8_flags.experimental_wasm_shared || config.to.is_shared() ||
+        config.from.heap_representation() != wasm::HeapType::kAny) {
+      return;
+    }
+    __ TrapIfNot(ObjectIsUnshared(object), TrapId::kTrapIllegalCast);
+  }
+
   V<Object> ReduceWasmTypeCastAbstract(V<Object> object,
                                        WasmTypeCheckConfig config) {
     const bool object_can_be_null = config.from.is_nullable();
     const bool null_succeeds = config.to.is_nullable();
     const bool object_can_be_i31 =
-        wasm::IsSubtypeOf(wasm::kWasmI31Ref.AsNonNull(), config.from,
-                          module_) ||
+        wasm::IsSubtypeOf(wasm::kWasmI31Ref.AsNonNull(),
+                          config.from.AsNonShared(), module_) ||
         config.from.heap_representation() == wasm::HeapType::kExtern;
 
     Label<> end_label(&Asm());
@@ -654,7 +707,11 @@ class WasmLoweringReducer : public Next {
       if (to_rep == wasm::HeapType::kNone ||
           to_rep == wasm::HeapType::kNoExtern ||
           to_rep == wasm::HeapType::kNoFunc ||
-          to_rep == wasm::HeapType::kNoExn) {
+          to_rep == wasm::HeapType::kNoExn ||
+          to_rep == wasm::HeapType::kNoneShared ||
+          to_rep == wasm::HeapType::kNoExternShared ||
+          to_rep == wasm::HeapType::kNoFuncShared ||
+          to_rep == wasm::HeapType::kNoExnShared) {
         __ TrapIfNot(__ IsNull(object, config.from), TrapId::kTrapIllegalCast);
         break;
       }
@@ -665,7 +722,8 @@ class WasmLoweringReducer : public Next {
           !v8_flags.experimental_wasm_skip_null_checks) {
         GOTO_IF(UNLIKELY(__ IsNull(object, config.from)), end_label);
       }
-      if (to_rep == wasm::HeapType::kI31) {
+      if (to_rep == wasm::HeapType::kI31 ||
+          to_rep == wasm::HeapType::kI31Shared) {
         // If earlier optimization passes reached the limit of possible graph
         // transformations, we could DCHECK(object_can_be_i31) here.
         V<Word32> success =
@@ -673,10 +731,12 @@ class WasmLoweringReducer : public Next {
         __ TrapIfNot(success, TrapId::kTrapIllegalCast);
         break;
       }
-      if (to_rep == wasm::HeapType::kEq) {
+      if (to_rep == wasm::HeapType::kEq ||
+          to_rep == wasm::HeapType::kEqShared) {
         if (object_can_be_i31) {
           GOTO_IF(UNLIKELY(__ IsSmi(object)), end_label);
         }
+        TrapOnSharedWasmObjectsIfUnshared(V<HeapObject>::Cast(object), config);
         __ TrapIfNot(IsDataRefMap(__ LoadMapField(object)),
                      TrapId::kTrapIllegalCast);
         break;
@@ -685,12 +745,16 @@ class WasmLoweringReducer : public Next {
       if (object_can_be_i31) {
         __ TrapIf(__ IsSmi(object), TrapId::kTrapIllegalCast);
       }
-      if (to_rep == wasm::HeapType::kArray) {
+      if (to_rep == wasm::HeapType::kArray ||
+          to_rep == wasm::HeapType::kArrayShared) {
+        TrapOnSharedWasmObjectsIfUnshared(V<HeapObject>::Cast(object), config);
         __ TrapIfNot(__ HasInstanceType(object, WASM_ARRAY_TYPE),
                      TrapId::kTrapIllegalCast);
         break;
       }
-      if (to_rep == wasm::HeapType::kStruct) {
+      if (to_rep == wasm::HeapType::kStruct ||
+          to_rep == wasm::HeapType::kStructShared) {
+        TrapOnSharedWasmObjectsIfUnshared(V<HeapObject>::Cast(object), config);
         __ TrapIfNot(__ HasInstanceType(object, WASM_STRUCT_TYPE),
                      TrapId::kTrapIllegalCast);
         break;
@@ -717,8 +781,8 @@ class WasmLoweringReducer : public Next {
     DCHECK(rtt.has_value());
     int rtt_depth = wasm::GetSubtypingDepth(module_, config.to.ref_index());
     bool object_can_be_null = config.from.is_nullable();
-    bool object_can_be_i31 =
-        wasm::IsSubtypeOf(wasm::kWasmI31Ref.AsNonNull(), config.from, module_);
+    bool object_can_be_i31 = wasm::IsSubtypeOf(
+        wasm::kWasmI31Ref.AsNonNull(), config.from.AsNonShared(), module_);
 
     Label<> end_label(&Asm());
     bool is_cast_from_any = config.from.is_reference_to(wasm::HeapType::kAny);
@@ -792,8 +856,8 @@ class WasmLoweringReducer : public Next {
     DCHECK(rtt.has_value());
     int rtt_depth = wasm::GetSubtypingDepth(module_, config.to.ref_index());
     bool object_can_be_null = config.from.is_nullable();
-    bool object_can_be_i31 =
-        wasm::IsSubtypeOf(wasm::kWasmI31Ref.AsNonNull(), config.from, module_);
+    bool object_can_be_i31 = wasm::IsSubtypeOf(
+        wasm::kWasmI31Ref.AsNonNull(), config.from.AsNonShared(), module_);
     bool is_cast_from_any = config.from.is_reference_to(wasm::HeapType::kAny);
 
     Label<Word32> end_label(&Asm());

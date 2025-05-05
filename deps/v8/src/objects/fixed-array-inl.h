@@ -335,7 +335,8 @@ Handle<TrustedFixedArray> TrustedFixedArray::New(IsolateT* isolate,
 // static
 template <class IsolateT>
 Handle<ProtectedFixedArray> ProtectedFixedArray::New(IsolateT* isolate,
-                                                     int capacity) {
+                                                     int capacity,
+                                                     bool shared) {
   if (V8_UNLIKELY(static_cast<unsigned>(capacity) >
                   ProtectedFixedArray::kMaxLength)) {
     FATAL("Fatal JavaScript invalid size error %d (see crbug.com/1201626)",
@@ -343,8 +344,9 @@ Handle<ProtectedFixedArray> ProtectedFixedArray::New(IsolateT* isolate,
   }
 
   std::optional<DisallowGarbageCollection> no_gc;
-  Handle<ProtectedFixedArray> result = Cast<ProtectedFixedArray>(
-      Allocate(isolate, capacity, &no_gc, AllocationType::kTrusted));
+  Handle<ProtectedFixedArray> result = Cast<ProtectedFixedArray>(Allocate(
+      isolate, capacity, &no_gc,
+      shared ? AllocationType::kSharedTrusted : AllocationType::kTrusted));
   MemsetTagged((*result)->RawFieldOfFirstElement(), Smi::zero(), capacity);
   return result;
 }
@@ -839,13 +841,13 @@ Address FixedIntegerArrayBase<T, Base>::get_element_address(int index) const {
 
 template <typename T, typename Base>
 T FixedIntegerArrayBase<T, Base>::get(int index) const {
-  static_assert(std::is_integral<T>::value);
+  static_assert(std::is_integral_v<T>);
   return base::ReadUnalignedValue<T>(get_element_address(index));
 }
 
 template <typename T, typename Base>
 void FixedIntegerArrayBase<T, Base>::set(int index, T value) {
-  static_assert(std::is_integral<T>::value);
+  static_assert(std::is_integral_v<T>);
   return base::WriteUnalignedValue<T>(get_element_address(index), value);
 }
 

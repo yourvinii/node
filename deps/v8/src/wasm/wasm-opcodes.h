@@ -255,6 +255,14 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const CanonicalSig* sig);
   V(I64SExtendI16, 0xc3, l_l, "i64.extend16_s")          \
   V(I64SExtendI32, 0xc4, l_l, "i64.extend32_s")
 
+#define FOREACH_WASMFX_OPCODE(V)          \
+  V(ContNew, 0xe0, _, "cont.new")         \
+  V(ContBind, 0xe1, _, "cont.bind")       \
+  V(Suspend, 0xe2, _, "suspend")          \
+  V(Resume, 0xe3, _, "resume")            \
+  V(ResumeThrow, 0xe4, _, "resume_throw") \
+  V(Switch, 0xe5, _, "switch")
+
 #define FOREACH_SIMPLE_OPCODE(V)          \
   FOREACH_SIMPLE_EXTENDED_CONST_OPCODE(V) \
   FOREACH_SIMPLE_NON_CONST_OPCODE(V)
@@ -758,6 +766,7 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const CanonicalSig* sig);
   V(RefI31, 0xfb1c, _, "ref.i31")                                              \
   V(I31GetS, 0xfb1d, _, "i31.get_s")                                           \
   V(I31GetU, 0xfb1e, _, "i31.get_u")                                           \
+  V(RefI31Shared, 0xfb1f, _, "ref.i31_shared")                                 \
   /* Custom Descriptors proposal */                                            \
   V(RefGetDesc, 0xfb22, _, "ref.get_desc")                                     \
   V(RefCastDesc, 0xfb23, _, "ref.cast_desc")                                   \
@@ -826,7 +835,8 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const CanonicalSig* sig);
   FOREACH_ATOMIC_OPCODE(V)           \
   FOREACH_ATOMIC_0_OPERAND_OPCODE(V) \
   FOREACH_NUMERIC_OPCODE(V)          \
-  FOREACH_GC_OPCODE(V)
+  FOREACH_GC_OPCODE(V)               \
+  FOREACH_WASMFX_OPCODE(V)
 
 // All signatures.
 #define FOREACH_SIGNATURE(V)                        \

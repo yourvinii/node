@@ -6,6 +6,7 @@
 
 #include <fstream>
 #include <optional>
+#include <utility>
 
 #include "include/v8-profiler.h"
 #include "src/api/api-inl.h"
@@ -14,6 +15,7 @@
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap.h"
+#include "src/objects/cpp-heap-object-wrapper-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/profiler/allocation-tracker.h"
 #include "src/profiler/heap-snapshot-generator-inl.h"
@@ -59,7 +61,7 @@ std::vector<v8::Local<v8::Value>> HeapProfiler::GetDetachedJSWrapperObjects() {
     if (HeapLayout::InCodeSpace(obj)) continue;
     if (!IsJSApiWrapperObject(obj)) continue;
     // Ensure object is wrappable, otherwise GetDetachedness() can crash
-    JSApiWrapper wrapper = JSApiWrapper(Cast<JSObject>(obj));
+    CppHeapObjectWrapper wrapper = CppHeapObjectWrapper(Cast<JSObject>(obj));
     if (!wrapper.GetCppHeapWrappable(isolate(), kAnyCppHeapPointer)) continue;
 
     v8::Local<v8::Value> data(
@@ -90,11 +92,23 @@ void HeapProfiler::RemoveBuildEmbedderGraphCallback(
     build_embedder_graph_callbacks_.erase(it);
 }
 
-void HeapProfiler::BuildEmbedderGraph(Isolate* isolate,
-                                      v8::EmbedderGraph* graph) {
+void HeapProfiler::BuildEmbedderGraph(
+    Isolate* isolate, v8::EmbedderGraph* graph,
+    UnorderedCppHeapExternalObjectSet&& cpp_heap_external_objects) {
+  if (internal_build_embedder_graph_callback_.first) {
+    internal_build_embedder_graph_callback_.first(
+        reinterpret_cast<v8::Isolate*>(isolate), graph,
+        internal_build_embedder_graph_callback_.second,
+        std::move(cpp_heap_external_objects));
+  }
   for (const auto& cb : build_embedder_graph_callbacks_) {
     cb.first(reinterpret_cast<v8::Isolate*>(isolate), graph, cb.second);
   }
+}
+
+void HeapProfiler::SetInternalBuildEmbedderGraphCallback(
+    InternalBuildEmbedderGraphCallback callback, void* data) {
+  internal_build_embedder_graph_callback_ = {callback, data};
 }
 
 void HeapProfiler::SetGetDetachednessCallback(

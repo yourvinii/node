@@ -283,7 +283,18 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   intptr_t ConstexprWordNot(intptr_t a) { return ~a; }
   uintptr_t ConstexprWordNot(uintptr_t a) { return ~a; }
 
-  TNode<BoolT> TaggedEqual(TNode<AnyTaggedT> a, TNode<AnyTaggedT> b) {
+#if defined(V8_EXTERNAL_CODE_SPACE) || defined(V8_ENABLE_SANDBOX)
+  void CheckObjectComparisonAllowed(TNode<AnyTaggedT> a, TNode<AnyTaggedT> b,
+                                    SourceLocation loc);
+#endif
+
+  TNode<BoolT> TaggedEqual(TNode<AnyTaggedT> a, TNode<AnyTaggedT> b,
+                           SourceLocation loc = SourceLocation::Current()) {
+#if defined(V8_EXTERNAL_CODE_SPACE) || defined(V8_ENABLE_SANDBOX)
+    if (v8_flags.enable_slow_asserts) {
+      CheckObjectComparisonAllowed(a, b, loc);
+    }
+#endif
     if (COMPRESS_POINTERS_BOOL) {
       return Word32Equal(ReinterpretCast<Word32T>(a),
                          ReinterpretCast<Word32T>(b));
@@ -292,8 +303,25 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     }
   }
 
-  TNode<BoolT> TaggedNotEqual(TNode<AnyTaggedT> a, TNode<AnyTaggedT> b) {
-    return Word32BinaryNot(TaggedEqual(a, b));
+  TNode<BoolT> TaggedNotEqual(TNode<AnyTaggedT> a, TNode<AnyTaggedT> b,
+                              SourceLocation loc = SourceLocation::Current()) {
+    return Word32BinaryNot(TaggedEqual(a, b, loc));
+  }
+
+  // A variant of TaggedEqual which allows comparing objects in different
+  // pointer compression cages. In particular, this should be used when
+  // comparing objects in trusted- or code space with objects in the main
+  // pointer compression cage. Currently only defined for HeapObject, this
+  // type can be expanded if needed.
+  TNode<BoolT> SafeEqual(TNode<HeapObject> a, TNode<HeapObject> b) {
+    if (V8_EXTERNAL_CODE_SPACE_BOOL || V8_ENABLE_SANDBOX_BOOL) {
+      return WordEqual(BitcastTaggedToWord(a), BitcastTaggedToWord(b));
+    }
+    return TaggedEqual(a, b);
+  }
+
+  TNode<BoolT> SafeNotEqual(TNode<HeapObject> a, TNode<HeapObject> b) {
+    return Word32BinaryNot(SafeEqual(a, b));
   }
 
   TNode<Smi> NoContextConstant();
@@ -322,9 +350,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   HEAP_MUTABLE_IMMOVABLE_OBJECT_LIST(HEAP_CONSTANT_ACCESSOR)
 #undef HEAP_CONSTANT_ACCESSOR
 
-#define HEAP_CONSTANT_TEST(rootIndexName, rootAccessorName, name) \
-  TNode<BoolT> Is##name(TNode<Object> value);                     \
-  TNode<BoolT> IsNot##name(TNode<Object> value);
+#define HEAP_CONSTANT_TEST(rootIndexName, rootAccessorName, name)        \
+  TNode<BoolT> Is##name(TNode<Object> value,                             \
+                        SourceLocation loc = SourceLocation::Current()); \
+  TNode<BoolT> IsNot##name(TNode<Object> value,                          \
+                           SourceLocation loc = SourceLocation::Current());
   HEAP_IMMOVABLE_OBJECT_LIST(HEAP_CONSTANT_TEST)
 #undef HEAP_CONSTANT_TEST
 
@@ -609,33 +639,26 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   using ExtraNode = std::pair<TNode<Object>, const char*>;
 
   void Dcheck(const BranchGenerator& branch, const char* message,
-              const char* file, int line,
               std::initializer_list<ExtraNode> extra_nodes = {},
               const SourceLocation& loc = SourceLocation::Current());
   void Dcheck(const NodeGenerator<BoolT>& condition_body, const char* message,
-              const char* file, int line,
               std::initializer_list<ExtraNode> extra_nodes = {},
               const SourceLocation& loc = SourceLocation::Current());
   void Dcheck(TNode<Word32T> condition_node, const char* message,
-              const char* file, int line,
               std::initializer_list<ExtraNode> extra_nodes = {},
               const SourceLocation& loc = SourceLocation::Current());
   void Check(const BranchGenerator& branch, const char* message,
-             const char* file, int line,
              std::initializer_list<ExtraNode> extra_nodes = {},
              const SourceLocation& loc = SourceLocation::Current());
   void Check(const NodeGenerator<BoolT>& condition_body, const char* message,
-             const char* file, int line,
              std::initializer_list<ExtraNode> extra_nodes = {},
              const SourceLocation& loc = SourceLocation::Current());
   void Check(TNode<Word32T> condition_node, const char* message,
-             const char* file, int line,
              std::initializer_list<ExtraNode> extra_nodes = {},
              const SourceLocation& loc = SourceLocation::Current());
   void FailAssert(const char* message,
                   const std::vector<FileAndLine>& files_and_lines,
-                  std::initializer_list<ExtraNode> extra_nodes = {},
-                  const SourceLocation& loc = SourceLocation::Current());
+                  std::initializer_list<ExtraNode> extra_nodes = {});
 
   void FastCheck(TNode<BoolT> condition);
 
@@ -773,6 +796,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // Check a value for smi-ness
   TNode<BoolT> TaggedIsSmi(TNode<MaybeObject> a);
   TNode<BoolT> TaggedIsNotSmi(TNode<MaybeObject> a);
+
+  // Check a value for HeapObject-ness (for a heap object tag bit).
+  TNode<BoolT> TaggedIsStrongHeapObject(TNode<MaybeObject> a);
+  TNode<BoolT> TaggedIsNotStrongHeapObject(TNode<MaybeObject> a);
 
   // Check that the value is a non-negative smi.
   TNode<BoolT> TaggedIsPositiveSmi(TNode<Object> a);
@@ -1227,7 +1254,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   {
     if (IsMapOffsetConstant(reference.offset)) {
       TNode<Map> map = LoadMap(CAST(reference.object));
-      DCHECK((std::is_base_of<T, Map>::value));
+      DCHECK((std::is_base_of_v<T, Map>));
       return ReinterpretCast<T>(map);
     }
 
@@ -1253,7 +1280,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     requires(std::is_convertible_v<TNode<T>, TNode<MaybeObject>>)
   {
     if (IsMapOffsetConstant(reference.offset)) {
-      DCHECK((std::is_base_of<T, Map>::value));
+      DCHECK((std::is_base_of_v<T, Map>));
       return StoreMap(CAST(reference.object), ReinterpretCast<Map>(value));
     }
     MachineRepresentation rep = MachineRepresentationOf<T>::value;
@@ -1288,8 +1315,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   // Load the floating point value of a HeapNumber.
   TNode<Float64T> LoadHeapNumberValue(TNode<HeapObject> object);
-  TNode<Int32T> LoadHeapInt32Value(TNode<HeapObject> object);
-  void StoreHeapInt32Value(TNode<HeapObject> object, TNode<Int32T> value);
+  TNode<Int32T> LoadContextCellInt32Value(TNode<ContextCell> object);
+  void StoreContextCellInt32Value(TNode<ContextCell> object,
+                                  TNode<Int32T> value);
   // Load the Map of an HeapObject.
   TNode<Map> LoadMap(TNode<HeapObject> object);
   // Load the instance type of an HeapObject.
@@ -1631,7 +1659,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void GotoIfContextElementEqual(TNode<Object> value,
                                  TNode<NativeContext> native_context,
                                  int slot_index, Label* if_equal) {
-    GotoIf(TaggedEqual(value, LoadContextElement(native_context, slot_index)),
+    GotoIf(TaggedEqual(value,
+                       LoadContextElementNoCell(native_context, slot_index)),
            if_equal);
   }
 
@@ -1798,9 +1827,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       int additional_offset = 0,
       CheckBounds check_bounds = CheckBounds::kAlways) {
     // TODO(v8:9708): Do we want to keep both IntPtrT and UintPtrT variants?
-    static_assert(std::is_same<TIndex, Smi>::value ||
-                      std::is_same<TIndex, UintPtrT>::value ||
-                      std::is_same<TIndex, IntPtrT>::value,
+    static_assert(std::is_same_v<TIndex, Smi> ||
+                      std::is_same_v<TIndex, UintPtrT> ||
+                      std::is_same_v<TIndex, IntPtrT>,
                   "Only Smi, UintPtrT or IntPtrT index is allowed");
     if (NeedsBoundsCheck(check_bounds)) {
       FixedArrayBoundsCheck(array, index, additional_offset);
@@ -1812,9 +1841,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   template <typename TIndex>
   void StoreFixedArrayElement(TNode<FixedArray> array, TNode<TIndex> index,
                               TNode<Smi> value, int additional_offset = 0) {
-    static_assert(std::is_same<TIndex, Smi>::value ||
-                      std::is_same<TIndex, IntPtrT>::value,
-                  "Only Smi or IntPtrT indeces is allowed");
+    static_assert(
+        std::is_same_v<TIndex, Smi> || std::is_same_v<TIndex, IntPtrT>,
+        "Only Smi or IntPtrT indeces is allowed");
     StoreFixedArrayElement(array, index, TNode<Object>{value},
                            UNSAFE_SKIP_WRITE_BARRIER, additional_offset);
   }
@@ -1973,7 +2002,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<HeapNumber> AllocateHeapNumberWithValue(double value) {
     return AllocateHeapNumberWithValue(Float64Constant(value));
   }
-  TNode<HeapNumber> AllocateHeapInt32WithValue(TNode<Int32T> value);
+
+  TNode<ContextCell> AllocateContextCell(TNode<Object> value);
 
   // Allocate a BigInt with {length} digits. Sets the sign bit to {false}.
   // Does not initialize the digits.
@@ -2860,6 +2890,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsUndetectableMap(TNode<Map> map);
   TNode<BoolT> IsNotWeakFixedArraySubclass(TNode<HeapObject> object);
   TNode<BoolT> IsZeroOrContext(TNode<Object> object);
+  TNode<BoolT> IsEmptyDependentCode(TNode<Object> object);
 
   TNode<BoolT> IsPromiseResolveProtectorCellInvalid();
   TNode<BoolT> IsPromiseThenProtectorCellInvalid();
@@ -2897,20 +2928,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
         ExternalReference::address_of_shared_string_table_flag());
   }
 
-  TNode<BoolT> IsScriptContextMutableHeapNumberFlag() {
-    return LoadRuntimeFlag(
-        ExternalReference::script_context_mutable_heap_number_flag());
-  }
-
-  TNode<BoolT> IsScriptContextMutableHeapInt32Flag() {
-#ifdef SUPPORT_SCRIPT_CONTEXT_MUTABLE_HEAP_INT32
-    return LoadRuntimeFlag(
-        ExternalReference::script_context_mutable_heap_int32_flag());
-#else
-    return BoolConstant(false);
-#endif  // SUPPORT_SCRIPT_CONTEXT_MUTABLE_HEAP_INT32
-  }
-
   TNode<BoolT> IsAdditiveSafeIntegerFeedbackEnabled() {
     if (Is64()) {
       return LoadRuntimeFlag(
@@ -2918,6 +2935,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     } else {
       return BoolConstant(false);
     }
+  }
+
+  TNode<BoolT> IsScriptContextCellsFlag() {
+    return LoadRuntimeFlag(
+        ExternalReference::address_of_script_context_cells_flag());
   }
 
   // True iff |object| is a Smi or a HeapNumber or a BigInt.
@@ -2997,6 +3019,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Uint16T> StringCharCodeAt(TNode<String> string, TNode<UintPtrT> index);
   // Return the single character string with only {code}.
   TNode<String> StringFromSingleCharCode(TNode<Int32T> code);
+  // Return the one byte single character string with only {code}.
+  TNode<String> StringFromSingleOneByteCharCode(TNode<Uint8T> code);
 
   // Type conversion helpers.
   enum class BigIntHandling { kConvertToNumber, kThrow };
@@ -3005,6 +3029,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // Convert a Number to a String.
   TNode<String> NumberToString(TNode<Number> input);
   TNode<String> NumberToString(TNode<Number> input, Label* bailout);
+
+  TNode<String> TryMatchPreallocatedNumberString(TNode<Int32T> value,
+                                                 Label* bailout);
 
   // Convert a Non-Number object to a Number.
   TNode<Number> NonNumberToNumber(
@@ -3358,7 +3385,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void SetNumberOfElements(TNode<Dictionary> dictionary,
                            TNode<Smi> num_elements_smi) {
     // Not supposed to be used for SwissNameDictionary.
-    static_assert(!(std::is_same<Dictionary, SwissNameDictionary>::value));
+    static_assert(!(std::is_same_v<Dictionary, SwissNameDictionary>));
 
     StoreFixedArrayElement(dictionary, Dictionary::kNumberOfElementsIndex,
                            num_elements_smi, SKIP_WRITE_BARRIER);
@@ -3367,7 +3394,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   template <class Dictionary>
   TNode<Smi> GetNumberOfDeletedElements(TNode<Dictionary> dictionary) {
     // Not supposed to be used for SwissNameDictionary.
-    static_assert(!(std::is_same<Dictionary, SwissNameDictionary>::value));
+    static_assert(!(std::is_same_v<Dictionary, SwissNameDictionary>));
 
     return CAST(LoadFixedArrayElement(
         dictionary, Dictionary::kNumberOfDeletedElementsIndex));
@@ -3377,7 +3404,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void SetNumberOfDeletedElements(TNode<Dictionary> dictionary,
                                   TNode<Smi> num_deleted_smi) {
     // Not supposed to be used for SwissNameDictionary.
-    static_assert(!(std::is_same<Dictionary, SwissNameDictionary>::value));
+    static_assert(!(std::is_same_v<Dictionary, SwissNameDictionary>));
 
     StoreFixedArrayElement(dictionary,
                            Dictionary::kNumberOfDeletedElementsIndex,
@@ -3387,7 +3414,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   template <class Dictionary>
   TNode<Smi> GetCapacity(TNode<Dictionary> dictionary) {
     // Not supposed to be used for SwissNameDictionary.
-    static_assert(!(std::is_same<Dictionary, SwissNameDictionary>::value));
+    static_assert(!(std::is_same_v<Dictionary, SwissNameDictionary>));
 
     return CAST(
         UnsafeLoadFixedArrayElement(dictionary, Dictionary::kCapacityIndex));
@@ -3821,6 +3848,15 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Int32T> LoadElementsKind(TNode<AllocationSite> allocation_site);
   TNode<Object> LoadNestedAllocationSite(TNode<AllocationSite> allocation_site);
 
+  TNode<Object> LoadAccessorPairGetter(TNode<AccessorPair> accessor_pair) {
+    return LoadObjectField<Object>(accessor_pair,
+                                   offsetof(AccessorPair, getter_));
+  }
+  TNode<Object> LoadAccessorPairSetter(TNode<AccessorPair> accessor_pair) {
+    return LoadObjectField<Object>(accessor_pair,
+                                   offsetof(AccessorPair, setter_));
+  }
+
   enum class IndexAdvanceMode { kPre, kPost };
   enum class IndexAdvanceDirection { kUp, kDown };
   enum class LoopUnrollingMode { kNo, kYes };
@@ -4123,7 +4159,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                               TNode<UintPtrT> index,
                               Label* detached_or_out_of_bounds);
 
-  TNode<IntPtrT> RabGsabElementsKindToElementByteSize(
+  TNode<Uint8T> RabGsabElementsKindToElementByteShift(
       TNode<Int32T> elementsKind);
   TNode<RawPtrT> LoadJSTypedArrayDataPtr(TNode<JSTypedArray> typed_array);
   TNode<JSArrayBuffer> GetTypedArrayBuffer(TNode<Context> context,
@@ -4247,9 +4283,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<JSAny> GetArgumentValue(TorqueStructArguments args,
                                 TNode<IntPtrT> index);
-
-  void SetArgumentValue(TorqueStructArguments args, TNode<IntPtrT> index,
-                        TNode<JSAny> value);
 
   enum class FrameArgumentsArgcType {
     kCountIncludesReceiver,
@@ -4754,6 +4787,14 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                           TVariable<Number>* var_result,
                                           Label* if_bailout);
 
+  // Checks if the value falls into [range_start, range_start+table_size) range
+  // and returns respective root entry [table_start, table_start+table_size).
+  // Otherwise jumps to out_of_range label.
+  // If the label is not provided, CSA_DCHECK is generated to ensure the range.
+  TNode<Object> TryMatchRootRange(TNode<Int32T> value, unsigned range_start,
+                                  RootIndex table_start, unsigned table_size,
+                                  Label* out_of_range);
+
   void DcheckHasValidMap(TNode<HeapObject> object);
 
   template <typename TValue>
@@ -4822,8 +4863,6 @@ class V8_EXPORT_PRIVATE CodeStubArguments {
   TNode<JSAny> GetOptionalArgumentValue(int index) {
     return GetOptionalArgumentValue(assembler_->IntPtrConstant(index));
   }
-
-  void SetArgumentValue(TNode<IntPtrT> index, TNode<JSAny> value);
 
   // Iteration doesn't include the receiver. |first| and |last| are zero-based.
   using ForEachBodyFunction = std::function<void(TNode<JSAny> arg)>;

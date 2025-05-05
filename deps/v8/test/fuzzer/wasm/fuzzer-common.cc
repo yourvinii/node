@@ -131,9 +131,8 @@ DirectHandle<WasmModuleObject> CompileReferenceModule(
 
 #if V8_ENABLE_DRUMBRAKE
 void ClearJsToWasmWrappersForTesting(Isolate* isolate) {
-  for (int i = 0; i < isolate->heap()->js_to_wasm_wrappers()->length(); i++) {
-    isolate->heap()->js_to_wasm_wrappers()->set(i, ClearedValue(isolate));
-  }
+  isolate->heap()->SetJSToWasmWrappers(
+      ReadOnlyRoots(isolate).empty_weak_fixed_array());
 }
 
 int ExecuteAgainstReference(Isolate* isolate,
@@ -462,6 +461,11 @@ int WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
   // coverage. For libfuzzer fuzzers it is not possible that the fuzzer enables
   // the flag by itself.
   EnableExperimentalWasmFeatures(isolate);
+
+  // Allow mixed old and new EH instructions in the same module for fuzzing, to
+  // help us test the interaction between the two EH proposals without requiring
+  // multiple modules.
+  v8_flags.wasm_allow_mixed_eh_for_testing = true;
 
   AccountingAllocator allocator;
   Zone zone(&allocator, ZONE_NAME);

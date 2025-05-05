@@ -124,7 +124,8 @@ void ConstantExpressionInterface::RefFunc(FullDecoder* decoder,
   bool function_is_shared = module_->type(sig_index).is_shared;
   CanonicalValueType type =
       CanonicalValueType::Ref(module_->canonical_type_id(sig_index),
-                              function_is_shared, RefTypeKind::kFunction);
+                              function_is_shared, RefTypeKind::kFunction)
+          .AsExactIfProposalEnabled();
   DirectHandle<WasmFuncRef> func_ref =
       WasmTrustedInstanceData::GetOrCreateFuncRef(
           isolate_,
@@ -172,8 +173,7 @@ DirectHandle<Map> ConstantExpressionInterface::GetRtt(
     error_ = MessageTemplate::kWasmTrapNullDereference;
     return {};
   }
-  return direct_handle(Cast<WasmStruct>(*maybe_obj)->get_described_rtt(),
-                       isolate_);
+  return direct_handle(Cast<WasmStruct>(*maybe_obj)->described_rtt(), isolate_);
 }
 
 void ConstantExpressionInterface::StructNew(FullDecoder* decoder,
@@ -191,11 +191,17 @@ void ConstantExpressionInterface::StructNew(FullDecoder* decoder,
   if (rtt.is_null()) return;  // Trap (descriptor was null).
 
   DirectHandle<WasmStruct> obj;
+  WriteBarrierMode mode = UPDATE_WRITE_BARRIER;
   if (type.is_descriptor()) {
+    DirectHandle<Object> first_field =
+        struct_type->first_field_can_be_prototype()
+            ? args[0].runtime_value.to_ref()
+            : direct_handle(Smi::zero(), isolate_);
     obj = WasmStruct::AllocateDescriptorUninitialized(isolate_, data, imm.index,
-                                                      rtt);
+                                                      rtt, first_field);
   } else {
     obj = isolate_->factory()->NewWasmStructUninitialized(struct_type, rtt);
+    mode = SKIP_WRITE_BARRIER;  // Object is in new space.
   }
   DisallowGarbageCollection no_gc;  // Must initialize fields first.
 
@@ -206,8 +212,7 @@ void ConstantExpressionInterface::StructNew(FullDecoder* decoder,
           reinterpret_cast<uint8_t*>(obj->RawFieldAddress(offset));
       args[i].runtime_value.Packed(struct_type->field(i)).CopyTo(address);
     } else {
-      TaggedField<Object, WasmStruct::kHeaderSize>::store(
-          *obj, offset, *args[i].runtime_value.to_ref());
+      obj->SetTaggedFieldValue(offset, *args[i].runtime_value.to_ref(), mode);
     }
   }
   result->runtime_value = WasmValue(
@@ -282,8 +287,9 @@ void ConstantExpressionInterface::StructNewDefault(
 
   DirectHandle<WasmStruct> obj;
   if (type.is_descriptor()) {
+    DirectHandle<Object> first_field(Smi::zero(), isolate_);
     obj = WasmStruct::AllocateDescriptorUninitialized(isolate_, data, imm.index,
-                                                      rtt);
+                                                      rtt, first_field);
   } else {
     obj = isolate_->factory()->NewWasmStructUninitialized(struct_type, rtt);
   }
@@ -329,7 +335,8 @@ void ConstantExpressionInterface::ArrayNew(FullDecoder* decoder,
       isolate_->factory()->NewWasmArray(imm.array_type->element_type(),
                                         length.runtime_value.to_u32(),
                                         initial_value.runtime_value, rtt),
-      decoder->module_->canonical_type(ValueType::Ref(imm.heap_type())));
+      decoder->module_->canonical_type(
+          ValueType::Ref(imm.heap_type()).AsExactIfProposalEnabled()));
 }
 
 void ConstantExpressionInterface::ArrayNewDefault(
@@ -359,7 +366,8 @@ void ConstantExpressionInterface::ArrayNewFixed(
   result->runtime_value = WasmValue(
       isolate_->factory()->NewWasmArrayFromElements(array_imm.array_type,
                                                     element_values, rtt),
-      decoder->module_->canonical_type(ValueType::Ref(array_imm.heap_type())));
+      decoder->module_->canonical_type(
+          ValueType::Ref(array_imm.heap_type()).AsExactIfProposalEnabled()));
 }
 
 // TODO(14034): These expressions are non-constant for now. There are plans to
@@ -388,7 +396,8 @@ void ConstantExpressionInterface::ArrayNewSegment(
     return;
   }
   CanonicalValueType element_type = rtt->wasm_type_info()->element_type();
-  CanonicalValueType result_type = rtt->wasm_type_info()->type();
+  CanonicalValueType result_type =
+      rtt->wasm_type_info()->type().AsExactIfProposalEnabled();
   if (element_type.is_numeric()) {
     const WasmDataSegment& data_segment =
         module_->data_segments[segment_imm.index];

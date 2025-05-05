@@ -25,6 +25,7 @@
 #include "src/wasm/wasm-constants.h"
 #include "src/wasm/wasm-debug.h"
 #include "src/wasm/wasm-engine.h"
+#include "src/wasm/wasm-export-wrapper-cache.h"
 #include "src/wasm/wasm-objects.h"
 #include "src/wasm/wasm-opcodes-inl.h"
 #include "src/wasm/wasm-subtyping.h"
@@ -436,7 +437,9 @@ RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
   SealHandleScope scope(isolate);
 
   DCHECK(isolate->context().is_null());
-  isolate->set_context(trusted_instance_data->native_context());
+  if (trusted_instance_data->has_native_context()) {
+    isolate->set_context(trusted_instance_data->native_context());
+  }
   bool success = wasm::CompileLazy(isolate, trusted_instance_data, func_index);
   if (!success) {
     DCHECK(v8_flags.wasm_lazy_validation);
@@ -544,7 +547,7 @@ void ReplaceJSToWasmWrapper(
   CHECK(func_ref->internal(isolate)->try_get_external(&external_function));
   if (external_function->shared()->HasWasmJSFunctionData()) return;
   CHECK(external_function->shared()->HasWasmExportedFunctionData());
-  external_function->UpdateCode(wrapper_code);
+  external_function->UpdateCode(isolate, wrapper_code);
   Tagged<WasmExportedFunctionData> function_data =
       external_function->shared()->wasm_exported_function_data();
   function_data->set_wrapper_code(wrapper_code);
@@ -561,20 +564,18 @@ RUNTIME_FUNCTION(Runtime_TierUpJSToWasmWrapper) {
 
   const wasm::WasmModule* module = trusted_data->module();
   const int function_index = function_data->function_index();
+  bool receiver_is_first_param = function_data->receiver_is_first_param() != 0;
   const wasm::WasmFunction& function = module->functions[function_index];
   const wasm::CanonicalTypeIndex sig_id =
       module->canonical_sig_id(function.sig_index);
   const wasm::CanonicalSig* sig =
       wasm::GetTypeCanonicalizer()->LookupFunctionSignature(sig_id);
 
-  Tagged<MaybeObject> maybe_cached_wrapper =
-      isolate->heap()->js_to_wasm_wrappers()->get(sig_id.index);
+  Tagged<CodeWrapper> maybe_cached_wrapper = wasm::WasmExportWrapperCache::Get(
+      isolate, sig_id, receiver_is_first_param);
   Tagged<Code> wrapper_code;
-  DCHECK(maybe_cached_wrapper.IsWeakOrCleared());
-  if (!maybe_cached_wrapper.IsCleared()) {
-    wrapper_code =
-        Cast<CodeWrapper>(maybe_cached_wrapper.GetHeapObjectAssumeWeak())
-            ->code(isolate);
+  if (!maybe_cached_wrapper.is_null()) {
+    wrapper_code = maybe_cached_wrapper->code(isolate);
   } else {
     // Set the context on the isolate and open a handle scope for allocation of
     // new objects. Wrap {trusted_data} in a handle so it survives GCs.
@@ -585,11 +586,12 @@ RUNTIME_FUNCTION(Runtime_TierUpJSToWasmWrapper) {
                                                               isolate};
     DirectHandle<Code> new_wrapper_code =
         wasm::JSToWasmWrapperCompilationUnit::CompileJSToWasmWrapper(
-            isolate, sig, sig_id);
+            isolate, sig, sig_id, receiver_is_first_param);
 
     // Compilation must have installed the wrapper into the cache.
-    DCHECK_EQ(MakeWeak(new_wrapper_code->wrapper()),
-              isolate->heap()->js_to_wasm_wrappers()->get(sig_id.index));
+    DCHECK_EQ(new_wrapper_code->wrapper(),
+              wasm::WasmExportWrapperCache::Get(isolate, sig_id,
+                                                receiver_is_first_param));
 
     // Reset raw pointers still needed outside the slow path.
     wrapper_code = *new_wrapper_code;
@@ -640,33 +642,28 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
   if (IsWasmInternalFunction(*origin)) {
     // The tierup for `WasmInternalFunction` is special, as there may not be an
     // instance.
-    size_t expected_arity = sig->parameter_count();
+    int expected_arity = static_cast<int>(sig->parameter_count());
     wasm::ImportCallKind kind;
     if (IsJSFunction(import_data->callable())) {
       Tagged<SharedFunctionInfo> shared =
           Cast<JSFunction>(import_data->callable())->shared();
       expected_arity =
           shared->internal_formal_parameter_count_without_receiver();
-      if (expected_arity == sig->parameter_count()) {
-        kind = wasm::ImportCallKind::kJSFunctionArityMatch;
-      } else {
-        kind = wasm::ImportCallKind::kJSFunctionArityMismatch;
-      }
+      kind = wasm::ImportCallKind::kJSFunction;
     } else {
       kind = wasm::ImportCallKind::kUseCallBuiltin;
     }
     wasm::WasmImportWrapperCache* cache = wasm::GetWasmImportWrapperCache();
     wasm::CanonicalTypeIndex canonical_sig_index =
         wasm::GetTypeCanonicalizer()->FindIndex_Slow(sig);
-    int arity = static_cast<int>(expected_arity);
     wasm::Suspend suspend = import_data->suspend();
     wasm::WasmCode* wrapper =
-        cache->MaybeGet(kind, canonical_sig_index, arity, suspend);
+        cache->MaybeGet(kind, canonical_sig_index, expected_arity, suspend);
     bool source_positions = false;
     if (!wrapper) {
       wrapper = cache->CompileWasmImportCallWrapper(
-          isolate, kind, sig, canonical_sig_index, source_positions, arity,
-          suspend);
+          isolate, kind, sig, canonical_sig_index, source_positions,
+          expected_arity, suspend);
     }
     Tagged<WasmInternalFunction> internal = Cast<WasmInternalFunction>(*origin);
 
@@ -730,9 +727,8 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
   wasm::ImportCallKind kind = resolved.kind();
   callable = resolved.callable();  // Update to ultimate target.
   DCHECK_NE(wasm::ImportCallKind::kLinkError, kind);
-  // {expected_arity} should only be used if kind != kJSFunctionArityMismatch.
   int expected_arity = static_cast<int>(sig->parameter_count());
-  if (kind == wasm::ImportCallKind ::kJSFunctionArityMismatch) {
+  if (kind == wasm::ImportCallKind ::kJSFunction) {
     expected_arity = Cast<JSFunction>(callable)
                          ->shared()
                          ->internal_formal_parameter_count_without_receiver();
@@ -1190,13 +1186,14 @@ RUNTIME_FUNCTION(Runtime_WasmArrayCopy) {
 RUNTIME_FUNCTION(Runtime_WasmAllocateDescriptorStruct) {
   ClearThreadInWasmScope flag_scope(isolate);
   HandleScope scope(isolate);
-  DCHECK_EQ(3, args.length());
+  DCHECK_EQ(4, args.length());
   DirectHandle<WasmTrustedInstanceData> trusted_data{
       Cast<WasmTrustedInstanceData>(args[0]), isolate};
   DirectHandle<Map> map{Cast<Map>(args[1]), isolate};
   wasm::ModuleTypeIndex type_index{args.positive_smi_value_at(2)};
-  return *WasmStruct::AllocateDescriptorUninitialized(isolate, trusted_data,
-                                                      type_index, map);
+  DirectHandle<Object> first_field{args[3], isolate};
+  return *WasmStruct::AllocateDescriptorUninitialized(
+      isolate, trusted_data, type_index, map, first_field);
 }
 
 RUNTIME_FUNCTION(Runtime_WasmArrayNewSegment) {
@@ -1360,35 +1357,34 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
   DirectHandle<WasmSuspenderObject> suspender =
       isolate->factory()->NewWasmSuspenderObject();
 
-  // Update the continuation state.
-  auto parent = direct_handle(Cast<WasmContinuationObject>(isolate->root(
-                                  RootIndex::kActiveContinuation)),
-                              isolate);
+  // Update the stack state.
+  wasm::StackMemory* active_stack = isolate->isolate_data()->active_stack();
   std::unique_ptr<wasm::StackMemory> target_stack =
       isolate->stack_pool().GetOrAllocate();
-  DirectHandle<WasmContinuationObject> target = WasmContinuationObject::New(
-      isolate, target_stack.get(), wasm::JumpBuffer::Suspended, parent);
-  target_stack->set_index(isolate->wasm_stacks().size());
-  isolate->wasm_stacks().emplace_back(std::move(target_stack));
-  for (size_t i = 0; i < isolate->wasm_stacks().size(); ++i) {
-    SLOW_DCHECK(isolate->wasm_stacks()[i]->index() == i);
-  }
-  isolate->roots_table().slot(RootIndex::kActiveContinuation).store(*target);
+  target_stack->jmpbuf()->parent = active_stack;
+  target_stack->jmpbuf()->stack_limit = target_stack->jslimit();
+  target_stack->jmpbuf()->sp = target_stack->base();
+  target_stack->jmpbuf()->fp = kNullAddress;
+  target_stack->jmpbuf()->state = wasm::JumpBuffer::Suspended;
+  isolate->isolate_data()->set_active_stack(target_stack.get());
 
   // Update the suspender state.
   FullObjectSlot active_suspender_slot =
       isolate->roots_table().slot(RootIndex::kActiveSuspender);
   suspender->set_parent(
       Cast<UnionOf<Undefined, WasmSuspenderObject>>(*active_suspender_slot));
-  suspender->set_continuation(*target);
+  suspender->set_stack(isolate, target_stack.get());
   active_suspender_slot.store(*suspender);
 
+  target_stack->set_index(isolate->wasm_stacks().size());
+  isolate->wasm_stacks().emplace_back(std::move(target_stack));
+  for (size_t i = 0; i < isolate->wasm_stacks().size(); ++i) {
+    SLOW_DCHECK(isolate->wasm_stacks()[i]->index() == i);
+  }
+
   // Stack limit will be updated in WasmReturnPromiseOnSuspendAsm builtin.
-  wasm::StackMemory* stack = reinterpret_cast<wasm::StackMemory*>(
-      parent->ReadExternalPointerField<kWasmStackMemoryTag>(
-          WasmContinuationObject::kStackOffset, isolate));
-  DCHECK_EQ(stack->jmpbuf()->state, wasm::JumpBuffer::Active);
-  stack->jmpbuf()->state = wasm::JumpBuffer::Inactive;
+  DCHECK_EQ(active_stack->jmpbuf()->state, wasm::JumpBuffer::Active);
+  active_stack->jmpbuf()->state = wasm::JumpBuffer::Inactive;
 
   return *suspender;
 }
